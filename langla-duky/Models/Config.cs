@@ -152,7 +152,7 @@ namespace langla_duky.Models
         
         // Relative (client-area based) coordinates [0..1], prioritized if enabled
         public bool UseRelativeCoordinates { get; set; } = true;
-        public RectangleF CaptchaAreaRelative { get; set; } = new RectangleF(0.32f, 0.303f, 0.12f, 0.06f);
+        public RectangleF CaptchaAreaRelative { get; set; } = new RectangleF(0.36f, 0.303f, 0.08f, 0.06f);
         
         // Auto-detect captcha region at runtime (overrides coordinates for the current run)
         public bool AutoDetectCaptchaArea { get; set; } = false;
