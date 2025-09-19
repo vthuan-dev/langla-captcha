@@ -273,8 +273,11 @@ namespace langla_duky
                     // No change; do nothing
                     return;
                 }
-                _config.UseManualCapture = newVal;
-                _config.SaveToFile();
+                if (_config != null)
+                {
+                    _config.UseManualCapture = newVal;
+                    _config.SaveToFile();
+                }
                 _btnSetCaptchaArea.Enabled = newVal;
                 _btnSetInputField.Enabled = newVal;
                 _btnSetConfirmButton.Enabled = newVal;
@@ -355,10 +358,20 @@ namespace langla_duky
             {
                 _tessEngine = new TesseractEngine("./tessdata", "eng", EngineMode.Default);
                 _tessEngine.SetVariable("tessedit_char_whitelist", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-                _tessEngine.SetVariable("tessedit_pageseg_mode", "8");
-                _tessEngine.SetVariable("tessedit_ocr_engine_mode", "3");
+                // Try different page segmentation modes for better CAPTCHA recognition
+                _tessEngine.SetVariable("tessedit_pageseg_mode", "8"); // Single word
+                _tessEngine.SetVariable("tessedit_ocr_engine_mode", "1"); // Neural nets LSTM only
                 _tessEngine.SetVariable("classify_bln_numeric_mode", "0");
-                LogMessage("✅ Initialized Tesseract engine");
+                // Additional settings for better CAPTCHA recognition
+                _tessEngine.SetVariable("tessedit_char_blacklist", "!@#$%^&*()_+-=[]{}|;':\",./<>?`~");
+                _tessEngine.SetVariable("tessedit_do_invert", "0");
+                _tessEngine.SetVariable("textord_min_linesize", "2.5");
+                // Settings for colored text recognition
+                _tessEngine.SetVariable("tessedit_char_blacklist", "");
+                _tessEngine.SetVariable("textord_min_xheight", "8");
+                _tessEngine.SetVariable("textord_min_linesize", "1.5");
+                _tessEngine.SetVariable("tessedit_pageseg_mode", "6"); // Uniform block of text
+                LogMessage("✅ Initialized Tesseract engine with colored CAPTCHA-optimized settings");
             }
             catch (Exception ex)
             {
@@ -1799,10 +1812,138 @@ namespace langla_duky
                 Cv2.Threshold(matDenoise, matBinary9, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
                 results.Add(("Upscale5x+Denoise+Otsu", TryOCR(matBinary9, "Upscale5x+Denoise+Otsu")));
 
+                // Approach 10: Color-based segmentation for orange/brown background
+                using var matBinary10 = new Mat();
+                using var matHSV10 = new Mat();
+                Cv2.CvtColor(matColor, matHSV10, ColorConversionCodes.BGR2HSV);
+                using var mask = new Mat();
+                // Create mask for non-orange/brown areas (text areas)
+                Cv2.InRange(matHSV10, new Scalar(0, 0, 0), new Scalar(30, 255, 200), mask);
+                Cv2.BitwiseNot(mask, mask);
+                Cv2.BitwiseAnd(matGray, matGray, matBinary10, mask);
+                Cv2.Threshold(matBinary10, matBinary10, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                results.Add(("ColorMask+Otsu", TryOCR(matBinary10, "ColorMask+Otsu")));
+
+                // Approach 11: Edge detection + dilation for text extraction
+                using var matBinary11 = new Mat();
+                using var edges = new Mat();
+                Cv2.Canny(matGray, edges, 50, 150);
+                using var kernel11 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(3, 3));
+                Cv2.Dilate(edges, matBinary11, kernel11);
+                Cv2.Threshold(matBinary11, matBinary11, 0, 255, ThresholdTypes.Binary);
+                results.Add(("EdgeDilate+Binary", TryOCR(matBinary11, "EdgeDilate+Binary")));
+
+                // Approach 12: High contrast enhancement
+                using var matBinary12 = new Mat();
+                using var matEnhanced = new Mat();
+                Cv2.ConvertScaleAbs(matGray, matEnhanced, 2.0, -100); // Increase contrast
+                Cv2.Threshold(matEnhanced, matBinary12, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                results.Add(("HighContrast+Otsu", TryOCR(matBinary12, "HighContrast+Otsu")));
+
+                // Approach 13: Orange background removal using color range
+                using var matBinary13 = new Mat();
+                using var matLab = new Mat();
+                Cv2.CvtColor(matColor, matLab, ColorConversionCodes.BGR2Lab);
+                using var orangeMask = new Mat();
+                // Define orange color range in Lab space
+                Cv2.InRange(matLab, new Scalar(0, 100, 100), new Scalar(255, 150, 150), orangeMask);
+                Cv2.BitwiseNot(orangeMask, orangeMask);
+                Cv2.BitwiseAnd(matGray, matGray, matBinary13, orangeMask);
+                Cv2.Threshold(matBinary13, matBinary13, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                results.Add(("OrangeMask+Otsu", TryOCR(matBinary13, "OrangeMask+Otsu")));
+
+                // Approach 14: Color-based text extraction (for colored CAPTCHA)
+                using var matBinary14 = new Mat();
+                using var matHSV14 = new Mat();
+                Cv2.CvtColor(matColor, matHSV14, ColorConversionCodes.BGR2HSV);
+                using var textMask = new Mat();
+                // Create mask for colored text (not white background)
+                Cv2.InRange(matHSV14, new Scalar(0, 50, 50), new Scalar(180, 255, 255), textMask);
+                Cv2.BitwiseAnd(matGray, matGray, matBinary14, textMask);
+                Cv2.Threshold(matBinary14, matBinary14, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                results.Add(("ColorText+Otsu", TryOCR(matBinary14, "ColorText+Otsu")));
+
+                // Approach 15: Multi-color channel processing
+                using var matBinary15 = new Mat();
+                using var matBGR = new Mat();
+                Cv2.CvtColor(matColor, matBGR, ColorConversionCodes.BGR2RGB);
+                var channels15 = new Mat[3];
+                Cv2.Split(matBGR, out channels15);
+                using var combined15 = new Mat();
+                Cv2.BitwiseOr(channels15[0], channels15[1], combined15);
+                Cv2.BitwiseOr(combined15, channels15[2], combined15);
+                Cv2.Threshold(combined15, matBinary15, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                results.Add(("MultiChannel+Otsu", TryOCR(matBinary15, "MultiChannel+Otsu")));
+                // Dispose channels manually
+                foreach (var channel in channels15)
+                {
+                    channel?.Dispose();
+                }
+
+                // Approach 16: Edge detection on color channels
+                using var matBinary16 = new Mat();
+                using var matEdges = new Mat();
+                Cv2.Canny(matGray, matEdges, 30, 100);
+                using var kernel16 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
+                Cv2.Dilate(matEdges, matBinary16, kernel16);
+                Cv2.Threshold(matBinary16, matBinary16, 0, 255, ThresholdTypes.Binary);
+                results.Add(("EdgeColor+Binary", TryOCR(matBinary16, "EdgeColor+Binary")));
+
+                // Approach 17: Color channel separation and combination
+                using var matBinary17 = new Mat();
+                var channels17 = new Mat[3];
+                Cv2.Split(matColor, out channels17);
+                using var blue = channels17[0];
+                using var green = channels17[1];
+                using var red = channels17[2];
+                using var combined17 = new Mat();
+                Cv2.BitwiseOr(blue, green, combined17);
+                Cv2.BitwiseOr(combined17, red, combined17);
+                Cv2.Threshold(combined17, matBinary17, 50, 255, ThresholdTypes.Binary);
+                results.Add(("ColorSeparation+Binary", TryOCR(matBinary17, "ColorSeparation+Binary")));
+                // Dispose channels manually
+                foreach (var channel in channels17)
+                {
+                    channel?.Dispose();
+                }
+
+                // Approach 18: HSV-based text extraction with multiple thresholds
+                using var matBinary18 = new Mat();
+                using var matHSV18 = new Mat();
+                Cv2.CvtColor(matColor, matHSV18, ColorConversionCodes.BGR2HSV);
+                using var mask1_18 = new Mat();
+                using var mask2_18 = new Mat();
+                using var mask3_18 = new Mat();
+                // Red range
+                Cv2.InRange(matHSV18, new Scalar(0, 50, 50), new Scalar(10, 255, 255), mask1_18);
+                // Green range
+                Cv2.InRange(matHSV18, new Scalar(40, 50, 50), new Scalar(80, 255, 255), mask2_18);
+                // Blue range
+                Cv2.InRange(matHSV18, new Scalar(100, 50, 50), new Scalar(130, 255, 255), mask3_18);
+                using var combinedMask18 = new Mat();
+                Cv2.BitwiseOr(mask1_18, mask2_18, combinedMask18);
+                Cv2.BitwiseOr(combinedMask18, mask3_18, combinedMask18);
+                Cv2.BitwiseAnd(matGray, matGray, matBinary18, combinedMask18);
+                Cv2.Threshold(matBinary18, matBinary18, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                results.Add(("HSVMultiColor+Otsu", TryOCR(matBinary18, "HSVMultiColor+Otsu")));
+
                 // Choose best result: prefer length 3–8, then any 2–10, with more flexible regex
                 var rx = new Regex("^[a-zA-Z0-9]{2,10}$");
                 var valid = results.Where(r => !string.IsNullOrEmpty(r.Text) && rx.IsMatch(r.Text)).ToList();
                 var preferred = valid.Where(r => r.Text.Length >= 3 && r.Text.Length <= 8).ToList();
+                
+                // If no valid results, try more lenient validation
+                if (valid.Count == 0)
+                {
+                    var lenientRx = new Regex("^[a-zA-Z0-9]{1,15}$");
+                    var lenientValid = results.Where(r => !string.IsNullOrEmpty(r.Text) && lenientRx.IsMatch(r.Text)).ToList();
+                    if (lenientValid.Count > 0)
+                    {
+                        LogMessage($"Using lenient validation: found {lenientValid.Count} results");
+                        valid = lenientValid;
+                        preferred = lenientValid.Where(r => r.Text.Length >= 2 && r.Text.Length <= 10).ToList();
+                    }
+                }
                 (string Method, string Text)? chosen = null;
                 if (preferred.Count > 0)
                 {
@@ -1878,10 +2019,17 @@ namespace langla_duky
                     
                     LogMessage($"OCR {method}: Raw='{originalText}', Filtered='{text}', Length={text.Length}");
                     
+                    // More detailed logging for debugging
+                    if (string.IsNullOrEmpty(text))
+                    {
+                        LogMessage($"OCR {method}: FAILED - empty result after filtering");
+                        return string.Empty;
+                    }
+                    
                     // Flexible regex filter
                     if (!Regex.IsMatch(text, "^[a-zA-Z0-9]{2,10}$"))
                     {
-                        LogMessage($"OCR {method}: FAILED - regex mismatch");
+                        LogMessage($"OCR {method}: FAILED - regex mismatch (text: '{text}', length: {text.Length})");
                         return string.Empty;
                     }
 

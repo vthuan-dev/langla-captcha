@@ -52,7 +52,7 @@ namespace langla_duky.Models
 
             try
             {
-                Bitmap captchaImage;
+                Bitmap? captchaImage;
                 if (_config.UseAbsoluteCoordinates || gameWindow == null || !gameWindow.IsValid())
                 {
                     // Interpret ManualCaptchaArea as absolute screen rectangle
@@ -62,6 +62,12 @@ namespace langla_duky.Models
                 {
                     // Interpret ManualCaptchaArea as client-area rectangle of the game window
                     captchaImage = ScreenCapture.CaptureWindowClientArea(gameWindow.Handle, CaptchaArea);
+                }
+
+                if (captchaImage == null)
+                {
+                    Console.WriteLine("Failed to capture captcha image.");
+                    return null;
                 }
 
                 // Save debug image
