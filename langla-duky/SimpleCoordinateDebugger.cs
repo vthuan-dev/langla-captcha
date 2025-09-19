@@ -54,12 +54,12 @@ namespace langla_duky
                     Directory.CreateDirectory(debugFolder);
                     string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                     
-                    // Lưu ảnh full window với grid
-                    string gridPath = Path.Combine(debugFolder, $"full_window_grid_{timestamp}.png");
-                    using (var gridImage = CreateGridOverlay(fullWindowImage))
+                    // Lưu ảnh full window với grid - DISABLED
+                    string gridPath = Path.Combine(debugFolder, $"full_window_no_grid_{timestamp}.png");
+                    using (var gridImage = fullWindowImage) // Use original image without grid
                     {
                         gridImage.Save(gridPath);
-                        Console.WriteLine($"💾 Saved grid image: {gridPath}");
+                        Console.WriteLine($"💾 Saved image without grid: {gridPath}");
                     }
 
                     // Lưu ảnh gốc

@@ -1280,8 +1280,8 @@ namespace langla_duky
 
                 using (fullImage)
                 {
-                    // Create grid overlay
-                    var gridImage = DrawCoordinateGrid(fullImage, bounds);
+                    // Create grid overlay - DISABLED
+                    var gridImage = fullImage; // Use original image without grid
                     
                     // Save both images
                     Directory.CreateDirectory("coordinate_debug");
@@ -1729,8 +1729,8 @@ namespace langla_duky
                     return null;
                 }
                 
-                // Step 2: Draw coordinate grid on full window image
-                var imageWithGrid = DrawCoordinateGridOnImage(fullWindowImage, _selectedGameWindow.Bounds);
+                // Step 2: Use original image without grid overlay
+                var imageWithGrid = fullWindowImage; // Disabled grid overlay
                 
                 // Step 3: Crop the captcha area from the image with grid
                 if (cfg.UseManualCapture || cfg.UseAbsoluteCoordinates)
@@ -1799,278 +1799,15 @@ namespace langla_duky
 
         private string? SolveCaptchaWithOpenCVAndTesseract(Bitmap bmp)
         {
-            try
-            {
-                using var ms = new MemoryStream();
-                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                var bytes = ms.ToArray();
-                using var matColor = Cv2.ImDecode(bytes, ImreadModes.Color);
-                if (matColor.Empty()) return string.Empty;
-
-                // Enhanced preprocessing for colored captcha
-                using var matGray = new Mat();
-                Cv2.CvtColor(matColor, matGray, ColorConversionCodes.BGR2GRAY);
-
-                // Multiple preprocessing approaches
-                var results = new List<(string Method, string Text)>();
-                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                
-                // Approach 1: Standard Otsu threshold
-                using var matBinary1 = new Mat();
-                Cv2.Threshold(matGray, matBinary1, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("Otsu", TryOCR(matBinary1, "Otsu")));
-
-                // Approach 1b: Inverted Otsu (light text on dark background)
-                using var matBinary1b = new Mat();
-                Cv2.Threshold(matGray, matBinary1b, 0, 255, ThresholdTypes.BinaryInv | ThresholdTypes.Otsu);
-                results.Add(("OtsuInv", TryOCR(matBinary1b, "OtsuInv")));
-
-                // Approach 2: Adaptive threshold (Mean)
-                using var matBinary2 = new Mat();
-                Cv2.AdaptiveThreshold(matGray, matBinary2, 255, AdaptiveThresholdTypes.MeanC, ThresholdTypes.Binary, 11, 2);
-                results.Add(("AdaptiveMean", TryOCR(matBinary2, "AdaptiveMean")));
-
-                // Approach 3: Morphological operations to clean noise
-                using var matBinary3 = new Mat();
-                Cv2.Threshold(matGray, matBinary3, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                using var kernel = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
-                Cv2.MorphologyEx(matBinary3, matBinary3, MorphTypes.Close, kernel);
-                Cv2.MorphologyEx(matBinary3, matBinary3, MorphTypes.Open, kernel);
-                results.Add(("Morphology", TryOCR(matBinary3, "Morphology")));
-
-                // Approach 4: Gaussian blur + threshold for smooth text
-                using var matBlur = new Mat();
-                Cv2.GaussianBlur(matGray, matBlur, new OpenCvSharp.Size(3, 3), 0);
-                using var matBinary4 = new Mat();
-                Cv2.Threshold(matBlur, matBinary4, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("Blur+Otsu", TryOCR(matBinary4, "Blur+Otsu")));
-
-                // Approach 5: Upscale x3 + CLAHE + Otsu (improves small text)
-                using var matUpscaled = new Mat();
-                Cv2.Resize(matGray, matUpscaled, new OpenCvSharp.Size(), 3.0, 3.0, InterpolationFlags.Cubic);
-                using var clahe = Cv2.CreateCLAHE(clipLimit: 3.0, tileGridSize: new OpenCvSharp.Size(8, 8));
-                using var matClahe = new Mat();
-                clahe.Apply(matUpscaled, matClahe);
-                using var matBinary5 = new Mat();
-                Cv2.Threshold(matClahe, matBinary5, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("Upscale3x+CLAHE+Otsu", TryOCR(matBinary5, "Upscale3x+CLAHE+Otsu")));
-
-                // Approach 5b: Upscale x4 + sharpen + OtsuInv
-                using var matUpscaled4 = new Mat();
-                Cv2.Resize(matGray, matUpscaled4, new OpenCvSharp.Size(), 4.0, 4.0, InterpolationFlags.Cubic);
-                using var sharpenKernel = new Mat(3, 3, MatType.CV_32F, new float[] { 0,-1,0, -1,5,-1, 0,-1,0 });
-                using var matSharpen = new Mat();
-                Cv2.Filter2D(matUpscaled4, matSharpen, matUpscaled4.Depth(), sharpenKernel);
-                using var matBinary5b = new Mat();
-                Cv2.Threshold(matSharpen, matBinary5b, 0, 255, ThresholdTypes.BinaryInv | ThresholdTypes.Otsu);
-                results.Add(("Upscale4x+Sharpen+OtsuInv", TryOCR(matBinary5b, "Upscale4x+Sharpen+OtsuInv")));
-
-                // Approach 6: HSV magenta/pink isolation (common for Duke captcha)
-                using var matHsv = new Mat();
-                Cv2.CvtColor(matColor, matHsv, ColorConversionCodes.BGR2HSV);
-                using var mask1 = new Mat();
-                using var mask2 = new Mat();
-                // Magenta ranges in HSV
-                Cv2.InRange(matHsv, new Scalar(140, 60, 60), new Scalar(180, 255, 255), mask1); // high H
-                Cv2.InRange(matHsv, new Scalar(0, 60, 60), new Scalar(15, 255, 255), mask2);    // wrap range (red-ish)
-                using var matMask = new Mat();
-                Cv2.BitwiseOr(mask1, mask2, matMask);
-                using var matMaskClean = new Mat();
-                var k2 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(3, 3));
-                Cv2.MorphologyEx(matMask, matMaskClean, MorphTypes.Open, k2);
-                Cv2.MorphologyEx(matMaskClean, matMaskClean, MorphTypes.Close, k2);
-                using var matBinary6 = new Mat();
-                // invert so text is dark on light for Tesseract
-                Cv2.BitwiseNot(matMaskClean, matBinary6);
-                results.Add(("HSV-Magenta", TryOCR(matBinary6, "HSV-Magenta")));
-
-                // Approach 7: Canny + dilate → fill → threshold
-                using var canny = new Mat();
-                Cv2.Canny(matGray, canny, 50, 150);
-                using var cannyDilate = new Mat();
-                var k3 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
-                Cv2.Dilate(canny, cannyDilate, k3);
-                using var matBinary7 = new Mat();
-                Cv2.Threshold(cannyDilate, matBinary7, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("Canny+Dilate", TryOCR(matBinary7, "Canny+Dilate")));
-
-                // Approach 8: Upscale 2x + bilateralFilter + adaptiveThreshold Gaussian
-                using var matUpscale2 = new Mat();
-                Cv2.Resize(matGray, matUpscale2, new OpenCvSharp.Size(), 2.0, 2.0, InterpolationFlags.Cubic);
-                using var matBilateral = new Mat();
-                Cv2.BilateralFilter(matUpscale2, matBilateral, 9, 75, 75);
-                using var matBinary8 = new Mat();
-                Cv2.AdaptiveThreshold(matBilateral, matBinary8, 255, AdaptiveThresholdTypes.GaussianC, ThresholdTypes.Binary, 11, 2);
-                results.Add(("Upscale2x+Bilateral+AdaptiveGaussian", TryOCR(matBinary8, "Upscale2x+Bilateral+AdaptiveGaussian")));
-
-                // Approach 9: Special handling for long captcha text (5x upscale + denoise)
-                using var matUpscale5 = new Mat();
-                Cv2.Resize(matGray, matUpscale5, new OpenCvSharp.Size(), 5.0, 5.0, InterpolationFlags.Cubic);
-                using var matDenoise = new Mat();
-                Cv2.FastNlMeansDenoising(matUpscale5, matDenoise);
-                using var matBinary9 = new Mat();
-                Cv2.Threshold(matDenoise, matBinary9, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("Upscale5x+Denoise+Otsu", TryOCR(matBinary9, "Upscale5x+Denoise+Otsu")));
-
-                // Approach 10: Color-based segmentation for orange/brown background
-                using var matBinary10 = new Mat();
-                using var matHSV10 = new Mat();
-                Cv2.CvtColor(matColor, matHSV10, ColorConversionCodes.BGR2HSV);
-                using var mask = new Mat();
-                // Create mask for non-orange/brown areas (text areas)
-                Cv2.InRange(matHSV10, new Scalar(0, 0, 0), new Scalar(30, 255, 200), mask);
-                Cv2.BitwiseNot(mask, mask);
-                Cv2.BitwiseAnd(matGray, matGray, matBinary10, mask);
-                Cv2.Threshold(matBinary10, matBinary10, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("ColorMask+Otsu", TryOCR(matBinary10, "ColorMask+Otsu")));
-
-                // Approach 11: Edge detection + dilation for text extraction
-                using var matBinary11 = new Mat();
-                using var edges = new Mat();
-                Cv2.Canny(matGray, edges, 50, 150);
-                using var kernel11 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(3, 3));
-                Cv2.Dilate(edges, matBinary11, kernel11);
-                Cv2.Threshold(matBinary11, matBinary11, 0, 255, ThresholdTypes.Binary);
-                results.Add(("EdgeDilate+Binary", TryOCR(matBinary11, "EdgeDilate+Binary")));
-
-                // Approach 12: High contrast enhancement
-                using var matBinary12 = new Mat();
-                using var matEnhanced = new Mat();
-                Cv2.ConvertScaleAbs(matGray, matEnhanced, 2.0, -100); // Increase contrast
-                Cv2.Threshold(matEnhanced, matBinary12, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("HighContrast+Otsu", TryOCR(matBinary12, "HighContrast+Otsu")));
-
-                // Approach 13: Orange background removal using color range
-                using var matBinary13 = new Mat();
-                using var matLab = new Mat();
-                Cv2.CvtColor(matColor, matLab, ColorConversionCodes.BGR2Lab);
-                using var orangeMask = new Mat();
-                // Define orange color range in Lab space
-                Cv2.InRange(matLab, new Scalar(0, 100, 100), new Scalar(255, 150, 150), orangeMask);
-                Cv2.BitwiseNot(orangeMask, orangeMask);
-                Cv2.BitwiseAnd(matGray, matGray, matBinary13, orangeMask);
-                Cv2.Threshold(matBinary13, matBinary13, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("OrangeMask+Otsu", TryOCR(matBinary13, "OrangeMask+Otsu")));
-
-                // Approach 14: Color-based text extraction (for colored CAPTCHA)
-                using var matBinary14 = new Mat();
-                using var matHSV14 = new Mat();
-                Cv2.CvtColor(matColor, matHSV14, ColorConversionCodes.BGR2HSV);
-                using var textMask = new Mat();
-                // Create mask for colored text (not white background)
-                Cv2.InRange(matHSV14, new Scalar(0, 50, 50), new Scalar(180, 255, 255), textMask);
-                Cv2.BitwiseAnd(matGray, matGray, matBinary14, textMask);
-                Cv2.Threshold(matBinary14, matBinary14, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("ColorText+Otsu", TryOCR(matBinary14, "ColorText+Otsu")));
-
-                // Approach 15: Multi-color channel processing
-                using var matBinary15 = new Mat();
-                using var matBGR = new Mat();
-                Cv2.CvtColor(matColor, matBGR, ColorConversionCodes.BGR2RGB);
-                var channels15 = new Mat[3];
-                Cv2.Split(matBGR, out channels15);
-                using var combined15 = new Mat();
-                Cv2.BitwiseOr(channels15[0], channels15[1], combined15);
-                Cv2.BitwiseOr(combined15, channels15[2], combined15);
-                Cv2.Threshold(combined15, matBinary15, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("MultiChannel+Otsu", TryOCR(matBinary15, "MultiChannel+Otsu")));
-                // Dispose channels manually
-                foreach (var channel in channels15)
-                {
-                    channel?.Dispose();
-                }
-
-                // Approach 16: Edge detection on color channels
-                using var matBinary16 = new Mat();
-                using var matEdges = new Mat();
-                Cv2.Canny(matGray, matEdges, 30, 100);
-                using var kernel16 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
-                Cv2.Dilate(matEdges, matBinary16, kernel16);
-                Cv2.Threshold(matBinary16, matBinary16, 0, 255, ThresholdTypes.Binary);
-                results.Add(("EdgeColor+Binary", TryOCR(matBinary16, "EdgeColor+Binary")));
-
-                // Approach 17: Color channel separation and combination
-                using var matBinary17 = new Mat();
-                var channels17 = new Mat[3];
-                Cv2.Split(matColor, out channels17);
-                using var blue = channels17[0];
-                using var green = channels17[1];
-                using var red = channels17[2];
-                using var combined17 = new Mat();
-                Cv2.BitwiseOr(blue, green, combined17);
-                Cv2.BitwiseOr(combined17, red, combined17);
-                Cv2.Threshold(combined17, matBinary17, 50, 255, ThresholdTypes.Binary);
-                results.Add(("ColorSeparation+Binary", TryOCR(matBinary17, "ColorSeparation+Binary")));
-                // Dispose channels manually
-                foreach (var channel in channels17)
-                {
-                    channel?.Dispose();
-                }
-
-                // Approach 18: HSV-based text extraction with multiple thresholds
-                using var matBinary18 = new Mat();
-                using var matHSV18 = new Mat();
-                Cv2.CvtColor(matColor, matHSV18, ColorConversionCodes.BGR2HSV);
-                using var mask1_18 = new Mat();
-                using var mask2_18 = new Mat();
-                using var mask3_18 = new Mat();
-                // Red range
-                Cv2.InRange(matHSV18, new Scalar(0, 50, 50), new Scalar(10, 255, 255), mask1_18);
-                // Green range
-                Cv2.InRange(matHSV18, new Scalar(40, 50, 50), new Scalar(80, 255, 255), mask2_18);
-                // Blue range
-                Cv2.InRange(matHSV18, new Scalar(100, 50, 50), new Scalar(130, 255, 255), mask3_18);
-                using var combinedMask18 = new Mat();
-                Cv2.BitwiseOr(mask1_18, mask2_18, combinedMask18);
-                Cv2.BitwiseOr(combinedMask18, mask3_18, combinedMask18);
-                Cv2.BitwiseAnd(matGray, matGray, matBinary18, combinedMask18);
-                Cv2.Threshold(matBinary18, matBinary18, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
-                results.Add(("HSVMultiColor+Otsu", TryOCR(matBinary18, "HSVMultiColor+Otsu")));
-
-                // Choose best result: prefer length 3–8, then any 2–10, with more flexible regex
-                var rx = new Regex("^[a-zA-Z0-9]{2,10}$");
-                var valid = results.Where(r => !string.IsNullOrEmpty(r.Text) && rx.IsMatch(r.Text)).ToList();
-                var preferred = valid.Where(r => r.Text.Length >= 3 && r.Text.Length <= 8).ToList();
-                
-                // If no valid results, try more lenient validation
-                if (valid.Count == 0)
-                {
-                    var lenientRx = new Regex("^[a-zA-Z0-9]{1,15}$");
-                    var lenientValid = results.Where(r => !string.IsNullOrEmpty(r.Text) && lenientRx.IsMatch(r.Text)).ToList();
-                    if (lenientValid.Count > 0)
-                    {
-                        LogMessage($"Using lenient validation: found {lenientValid.Count} results");
-                        valid = lenientValid;
-                        preferred = lenientValid.Where(r => r.Text.Length >= 2 && r.Text.Length <= 10).ToList();
-                    }
-                }
-                (string Method, string Text)? chosen = null;
-                if (preferred.Count > 0)
-                {
-                    chosen = preferred.OrderByDescending(r => r.Text.Length).First();
-                }
-                else if (valid.Count > 0)
-                {
-                    chosen = valid.OrderByDescending(r => r.Text.Length).First();
-                }
-
-                if (chosen.HasValue)
-                {
-                    _lastOcrMethod = chosen.Value.Method;
-                    LogMessage($"OCR Best result: '{chosen.Value.Text}' via {_lastOcrMethod} from {valid.Count} valid results");
-                    return chosen.Value.Text;
-                }
-
-                LogMessage($"OCR failed: All {results.Count} approaches returned empty/invalid results");
-                _lastOcrMethod = string.Empty;
-                return string.Empty;
-            }
-            catch (Exception ex)
-            {
-                LogMessage($"OCR error: {ex.Message}");
-                _lastOcrMethod = string.Empty;
-                return string.Empty;
-            }
+            // Per CAPTCHA_PROCESSING_PROMPT.md, this now delegates to the 4-digit processor.
+            var processor = new Captcha4DigitProcessor("./tessdata");
+            string result = processor.ProcessCaptcha4Digits(bmp);
+            
+            // The new processor returns "" for failure, which is equivalent to the old null/empty.
+            // We can log the chosen method for consistency, although it's now fixed.
+            _lastOcrMethod = "4DigitProcessor"; 
+            
+            return result;
         }
 
         private string TryOCR(Mat binaryMat, string method)

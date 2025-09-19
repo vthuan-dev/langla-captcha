@@ -31,7 +31,8 @@
     "UseCapSolver": true,
     "OpenCVFirst": false,
     "CapSolverAPIKey": "CAP-C90A0F23AE0DC0C4FDEFE047059EBBF134117DB9A0A8826E9DF5752BCFFF2507",
-    "TessdataPath": "./tessdata"
+    "TessdataPath": "./tessdata",
+    "Use4DigitMode": true
   },
   "AutomationSettings": {
     "DelayBetweenAttempts": 2000,
