@@ -14,6 +14,7 @@ using System.Threading;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using Newtonsoft.Json;
 using Size = System.Drawing.Size;
 using Point = System.Drawing.Point;
 
@@ -132,7 +133,9 @@ namespace langla_duky
             _config = Config.LoadFromFile();
             _manualCapture = new ManualCaptchaCapture(_config);
             InitializeTesseract();
+            _suppressManualEvents = true;
             UpdateUIForWindowState();
+            _suppressManualEvents = false;
         }
 
         private Bitmap FitTo(BoxSize target, Bitmap src)
@@ -263,9 +266,10 @@ namespace langla_duky
             btnDebugFullWindow.Click += BtnDebugFullWindow_Click;
             grpAdvancedTools.Controls.Add(btnDebugFullWindow);
 
-            _chkUseManual = new CheckBox { Text = "Use Manual", Location = new Point(15, 70), Size = new Size(120, 25), Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = PrimaryBlue, Checked = _config?.UseManualCapture ?? false };
+            _chkUseManual = new CheckBox { Text = "Use Manual", Location = new Point(15, 70), Size = new Size(120, 25), Font = new Font("Segoe UI", 9F, FontStyle.Bold), ForeColor = PrimaryBlue, Checked = false };
             _chkUseManual.CheckedChanged += (s, e) =>
             {
+                LogMessage($"DEBUG: CheckedChanged event triggered, suppress={_suppressManualEvents}, newVal={_chkUseManual.Checked}");
                 if (_suppressManualEvents) return;
                 bool newVal = _chkUseManual.Checked;
                 if (_config?.UseManualCapture == newVal)
@@ -277,6 +281,7 @@ namespace langla_duky
                 {
                     _config.UseManualCapture = newVal;
                     _config.SaveToFile();
+                    LogMessage($"DEBUG: Saved UseManualCapture={newVal} to config");
                 }
                 _btnSetCaptchaArea.Enabled = newVal;
                 _btnSetInputField.Enabled = newVal;
@@ -390,7 +395,9 @@ namespace langla_duky
                         _selectedGameWindow = selector.SelectedWindow;
                         LogMessage($"Selected window: {_selectedGameWindow.WindowTitle} ({_selectedGameWindow.Bounds.Width}x{_selectedGameWindow.Bounds.Height})");
                         StartGameWindowPreview();
+                        _suppressManualEvents = true;
                         UpdateUIForWindowState();
+                        _suppressManualEvents = false;
                     }
                 }
             }
@@ -477,27 +484,105 @@ namespace langla_duky
             // Always reload latest config from file so Start reflects @config.json changes
             try
             {
+                LogMessage($"DEBUG: Environment.CurrentDirectory: {Environment.CurrentDirectory}");
+                LogMessage($"DEBUG: AppDomain.CurrentDomain.BaseDirectory: {AppDomain.CurrentDomain.BaseDirectory}");
+                
+                // Check if config files exist
+                string cwdConfigPath = Path.Combine(Environment.CurrentDirectory, "config.json");
+                string baseDirConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+                LogMessage($"DEBUG: CWD config path: {cwdConfigPath} (exists: {File.Exists(cwdConfigPath)})");
+                LogMessage($"DEBUG: BaseDir config path: {baseDirConfigPath} (exists: {File.Exists(baseDirConfigPath)})");
+                
+                // Try to load config and see what happens
+                LogMessage("DEBUG: About to call Config.LoadFromFile()");
+                
+                // Let's manually check what ResolveConfigPath would return
+                string manualCwdPath = Path.Combine(Environment.CurrentDirectory, "config.json");
+                string manualBaseDirPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+                LogMessage($"DEBUG: Manual CWD path: {manualCwdPath} (exists: {File.Exists(manualCwdPath)})");
+                LogMessage($"DEBUG: Manual BaseDir path: {manualBaseDirPath} (exists: {File.Exists(manualBaseDirPath)})");
+                
+                // Try to read the file directly
+                if (File.Exists(manualCwdPath))
+                {
+                    string directContent = File.ReadAllText(manualCwdPath);
+                    LogMessage($"DEBUG: Direct read from CWD: {directContent}");
+                }
+                if (File.Exists(manualBaseDirPath))
+                {
+                    string directContent = File.ReadAllText(manualBaseDirPath);
+                    LogMessage($"DEBUG: Direct read from BaseDir: {directContent}");
+                }
+                
                 var reloaded = Config.LoadFromFile();
-                // If user wants absolute coordinates, prefer them and disable manual capture
+                LogMessage($"DEBUG: Loaded config - UseManual={reloaded.UseManualCapture}, AutoDetect={reloaded.AutoDetectCaptchaArea}, UseAbs={reloaded.UseAbsoluteCoordinates}, UseRel={reloaded.UseRelativeCoordinates}");
+                LogMessage($"DEBUG: Config file path: {reloaded.LoadedPath}");
+                LogMessage($"DEBUG: Config JSON deserialized values: UseManualCapture={reloaded.UseManualCapture}, UseAbsoluteCoordinates={reloaded.UseAbsoluteCoordinates}, UseRelativeCoordinates={reloaded.UseRelativeCoordinates}");
+                
+                // If LoadedPath is null, let's try to manually deserialize the JSON we read earlier
+                if (string.IsNullOrEmpty(reloaded.LoadedPath))
+                {
+                    LogMessage("DEBUG: LoadedPath is null, trying manual deserialization...");
+                    try
+                    {
+                        string manualJson = File.ReadAllText(manualCwdPath);
+                        var manualConfig = JsonConvert.DeserializeObject<Config>(manualJson);
+                        LogMessage($"DEBUG: Manual deserialization result - UseManualCapture={manualConfig?.UseManualCapture}, UseAbsoluteCoordinates={manualConfig?.UseAbsoluteCoordinates}, UseRelativeCoordinates={manualConfig?.UseRelativeCoordinates}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"ERROR: Manual deserialization failed: {ex.Message}");
+                    }
+                }
+                
+                // Check if the loaded path is different from what we expect
+                if (string.IsNullOrEmpty(reloaded.LoadedPath))
+                {
+                    LogMessage("ERROR: Config.LoadedPath is null or empty!");
+                    LogMessage("DEBUG: This means config was created with default values, not loaded from file!");
+                }
+                else
+                {
+                    LogMessage($"DEBUG: Config was loaded from: {reloaded.LoadedPath}");
+                    
+                    // Verify the file content
+                    if (File.Exists(reloaded.LoadedPath))
+                    {
+                        string fileContent = File.ReadAllText(reloaded.LoadedPath);
+                        LogMessage($"DEBUG: File content from {reloaded.LoadedPath}: {fileContent}");
+                    }
+                    else
+                    {
+                        LogMessage($"ERROR: Config.LoadedPath points to non-existent file: {reloaded.LoadedPath}");
+                    }
+                }
+                // Respect the config file settings - don't override them
                 if (reloaded.UseAbsoluteCoordinates)
                 {
-                    reloaded.UseManualCapture = false;
-                    LogMessage("Config: Using absolute coordinates from config.json (manual capture disabled).");
+                    LogMessage("Config: Using absolute coordinates from config.json.");
                 }
-                // Enable runtime auto-detection on Start so tool auto-captures captcha area
-                reloaded.AutoDetectCaptchaArea = true;
-                reloaded.UseManualCapture = false;
-                LogMessage("Config: AutoDetectCaptchaArea enabled on Start (manual disabled).");
+                else if (reloaded.AutoDetectCaptchaArea)
+                {
+                    LogMessage("Config: AutoDetectCaptchaArea enabled on Start.");
+                }
+                else
+                {
+                    LogMessage("Config: Using static coordinates from config (AutoDetectCaptchaArea disabled).");
+                }
                 _config = reloaded;
                 _manualCapture = new ManualCaptchaCapture(_config);
                 LogMessage($"Config flags: Manual={_config.UseManualCapture}, Abs={_config.UseAbsoluteCoordinates}, Rel={_config.UseRelativeCoordinates}");
+                LogMessage($"Config values: UseManualCapture={_config.UseManualCapture}, UseAbsoluteCoordinates={_config.UseAbsoluteCoordinates}, UseRelativeCoordinates={_config.UseRelativeCoordinates}");
                 // Masked key logging
                 var key = _config.OCRSettings?.CapSolverAPIKey ?? string.Empty;
                 if (!string.IsNullOrEmpty(key))
                 {
                     LogMessage($"CapSolver API key: {MaskKey(key)}");
                 }
+                // Update UI but suppress checkbox events to prevent config override
+                _suppressManualEvents = true;
                 UpdateUIForWindowState();
+                _suppressManualEvents = false;
             }
             catch (Exception ex)
             {
@@ -896,7 +981,9 @@ namespace langla_duky
                         _lblSelectedWindow.ForeColor = SuccessGreen;
                         LogMessage($"Auto-detected window: {gameWindow.WindowTitle}");
                         StartGameWindowPreview();
+                        _suppressManualEvents = true;
                         UpdateUIForWindowState();
+                        _suppressManualEvents = false;
                     });
                 }
                 else
@@ -958,9 +1045,18 @@ namespace langla_duky
             if (_btnSetConfirmButton != null) _btnSetConfirmButton.Enabled = manual;
             if (_chkUseManual != null)
             {
-                _suppressManualEvents = true;
-                _chkUseManual.Checked = manual;
-                _suppressManualEvents = false;
+                // Only update checkbox if we're not already suppressing events
+                if (!_suppressManualEvents)
+                {
+                    _suppressManualEvents = true;
+                    _chkUseManual.Checked = manual;
+                    _suppressManualEvents = false;
+                }
+                else
+                {
+                    // If already suppressing, just set the value directly
+                    _chkUseManual.Checked = manual;
+                }
             }
 
             if (!windowIsValid)
@@ -1442,10 +1538,12 @@ namespace langla_duky
         private Rectangle GetEffectiveCaptchaArea()
         {
             var cfg = _config; // Use in-memory config
+            LogMessage($"DEBUG: GetEffectiveCaptchaArea - UseManual={cfg.UseManualCapture}, AutoDetect={cfg.AutoDetectCaptchaArea}, UseAbs={cfg.UseAbsoluteCoordinates}, UseRel={cfg.UseRelativeCoordinates}");
 
             // Priority 0: Manual Capture (screen coords)
             if (cfg.UseManualCapture)
             {
+                LogMessage("DEBUG: Checking manual capture...");
                 if (_manualCapture != null && _manualCapture.IsValid())
                 {
                     _lastRoiMode = "manual";
@@ -1458,6 +1556,7 @@ namespace langla_duky
             // Priority 1: Advanced Auto-detect at runtime (client coords)
             if (cfg.AutoDetectCaptchaArea && _selectedGameWindow != null && _selectedGameWindow.IsValid())
             {
+                LogMessage("DEBUG: Checking auto-detect...");
                 try
                 {
                     var detected = TryAdvancedAutoDetectCaptchaArea();
@@ -1481,6 +1580,7 @@ namespace langla_duky
             // Priority 2: Absolute screen coordinates
             if (cfg.UseAbsoluteCoordinates)
             {
+                LogMessage("DEBUG: Using absolute coordinates...");
                 var abs = new Rectangle(
                     cfg.CaptchaLeftX,
                     cfg.CaptchaTopY,

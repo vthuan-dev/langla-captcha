@@ -2,29 +2,30 @@
   "GameWindowTitle": "Duke Client - By iamDuke",
   "UseManualCapture": false,
   "CaptchaArea": {
-    "X": 490,
-    "Y": 245,
-    "Width": 80,
-    "Height": 25
+    "X": 0,
+    "Y": 0,
+    "Width": 200,
+    "Height": 60
   },
   "InputFieldPosition": {
     "X": 640,
-    "Y": 410
+    "Y": 430
   },
   "ConfirmButtonPosition": {
     "X": 640,
-    "Y": 560
+    "Y": 510
   },
-  "UseAbsoluteCoordinates": true,
-  "UseRelativeCoordinates": false,
-  "CaptchaLeftX": 485,
-  "CaptchaTopY": 240,
-  "CaptchaRightX": 635,
-  "CaptchaBottomY": 290,
-  "InputFieldX": 510,
-  "InputFieldY": 340,
-  "ConfirmButtonX": 510,
-  "ConfirmButtonY": 450,
+  "UseAbsoluteCoordinates": false,
+  "UseRelativeCoordinates": true,
+  "AutoDetectCaptchaArea": false,
+  "CaptchaLeftX": 0,
+  "CaptchaTopY": 0,
+  "CaptchaRightX": 200,
+  "CaptchaBottomY": 60,
+  "InputFieldX": 640,
+  "InputFieldY": 430,
+  "ConfirmButtonX": 640,
+  "ConfirmButtonY": 510,
   "OCRSettings": {
     "UseOpenCV": true,
     "UseCapSolver": true,
