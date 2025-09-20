@@ -2106,7 +2106,13 @@ namespace langla_duky
             await Task.Delay(cfg.AutomationSettings.DelayAfterClick, token);
             InputAutomation.SendTextToWindow(_selectedGameWindow!.Handle, captchaText);
             await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token);
+            
+            // Press Enter after typing the captcha text
+            LogMessage($"⌨️ Pressing Enter after typing captcha: '{captchaText}'");
+            InputAutomation.SendKeyPress(_selectedGameWindow!.Handle, 0x0D); // VK_RETURN = 0x0D
+            await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token);
 
+            // Also click confirm button as backup
             InputAutomation.ClickInWindow(_selectedGameWindow!.Handle, confirmPointClient);
         }
         private void DrawROIRectangle(Rectangle rect, string label)
