@@ -17,7 +17,7 @@
   },
   "UseAbsoluteCoordinates": false,
   "UseRelativeCoordinates": true,
-  "AutoDetectCaptchaArea": false,
+  "AutoDetectCaptchaArea": true,
   "CaptchaLeftX": 0,
   "CaptchaTopY": 0,
   "CaptchaRightX": 200,
@@ -27,12 +27,9 @@
   "ConfirmButtonX": 640,
   "ConfirmButtonY": 510,
   "OCRSettings": {
-    "UseOpenCV": true,
-    "UseCapSolver": true,
-    "OpenCVFirst": false,
-    "CapSolverAPIKey": "CAP-C90A0F23AE0DC0C4FDEFE047059EBBF134117DB9A0A8826E9DF5752BCFFF2507",
     "TessdataPath": "./tessdata",
-    "Use4DigitMode": true
+    "Language": "eng",
+    "CharWhitelist": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
   },
   "AutomationSettings": {
     "DelayBetweenAttempts": 2000,

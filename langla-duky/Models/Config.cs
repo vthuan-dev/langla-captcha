@@ -39,7 +39,7 @@ namespace langla_duky.Models
                         
                     if (reader.TokenType == JsonToken.PropertyName)
                     {
-                        string propertyName = reader.Value.ToString();
+                        string propertyName = reader.Value?.ToString() ?? string.Empty;
                         reader.Read();
                         
                         switch (propertyName)
@@ -96,7 +96,7 @@ namespace langla_duky.Models
                         
                     if (reader.TokenType == JsonToken.PropertyName)
                     {
-                        string propertyName = reader.Value.ToString();
+                        string propertyName = reader.Value?.ToString() ?? string.Empty;
                         reader.Read();
                         
                         switch (propertyName)
@@ -286,30 +286,21 @@ namespace langla_duky.Models
 
     public class OCRSettings
     {
-        // CAPTCHA Solver Settings
-        public bool UseCapSolver { get; set; } = true; // Use CapSolver
-        public string CapSolverAPIKey { get; set; } = "";
-        
-        // NoCaptchaAI Settings
-        public bool UseNoCaptchaAI { get; set; } = false; // Disable NoCaptchaAI by default
-        public string NoCaptchaAIAPIKey { get; set; } = "vthuandev-449949f0-7900-6219-5f32-16b41050ca0a";
+        // Simple OpenCV + Tesseract settings
+        public string TessdataPath { get; set; } = "./tessdata";
+        public string Language { get; set; } = "eng";
+        public string CharWhitelist { get; set; } = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         
         // Legacy settings (kept for compatibility but not used)
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
-        public string TessdataPath { get; set; } = "./tessdata";
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
-        public string Language { get; set; } = "eng";
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
-        public string CharWhitelist { get; set; } = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
+        [Obsolete("Legacy setting - not used")]
         public bool UseOCRAPI { get; set; } = false;
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
+        [Obsolete("Legacy setting - not used")]
         public string OCRAPIProvider { get; set; } = "NoCaptchaAI";
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
+        [Obsolete("Legacy setting - not used")]
         public string OCRAPIKey { get; set; } = "";
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
+        [Obsolete("Legacy setting - not used")]
         public int OCRAPITimeout { get; set; } = 30;
-        [Obsolete("No longer used - AI CAPTCHA solvers only")]
+        [Obsolete("Legacy setting - not used")]
         public bool FallbackToTesseract { get; set; } = false;
     }
 

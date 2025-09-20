@@ -53,6 +53,7 @@ namespace langla_duky
     {
         private Config _config = null!;
         private TesseractEngine? _tessEngine;
+        private GameCaptchaSolver? _gameCaptchaSolver;
         private int _successCount = 0;
         private int _failureCount = 0;
         private string _lastCaptchaText = string.Empty;
@@ -133,6 +134,7 @@ namespace langla_duky
             _config = Config.LoadFromFile();
             _manualCapture = new ManualCaptchaCapture(_config);
             InitializeTesseract();
+            InitializeGameCaptchaSolver();
             _suppressManualEvents = true;
             UpdateUIForWindowState();
             _suppressManualEvents = false;
@@ -358,29 +360,51 @@ namespace langla_duky
         }
 
         private void InitializeTesseract()
-        {
+        {   
             try
             {
                 _tessEngine = new TesseractEngine("./tessdata", "eng", EngineMode.Default);
+                
+                // Try different settings for captcha images
                 _tessEngine.SetVariable("tessedit_char_whitelist", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-                // Try different page segmentation modes for better CAPTCHA recognition
-                _tessEngine.SetVariable("tessedit_pageseg_mode", "8"); // Single word
-                _tessEngine.SetVariable("tessedit_ocr_engine_mode", "1"); // Neural nets LSTM only
-                _tessEngine.SetVariable("classify_bln_numeric_mode", "0");
-                // Additional settings for better CAPTCHA recognition
-                _tessEngine.SetVariable("tessedit_char_blacklist", "!@#$%^&*()_+-=[]{}|;':\",./<>?`~");
+                _tessEngine.SetVariable("tessedit_pageseg_mode", "8"); // Single word (changed from 13)
+                _tessEngine.SetVariable("tessedit_ocr_engine_mode", "0"); // Legacy + LSTM (changed from 2)
+                _tessEngine.SetVariable("classify_bln_numeric_mode", "0"); // Allow both letters and numbers
                 _tessEngine.SetVariable("tessedit_do_invert", "0");
                 _tessEngine.SetVariable("textord_min_linesize", "2.5");
-                // Settings for colored text recognition
-                _tessEngine.SetVariable("tessedit_char_blacklist", "");
-                _tessEngine.SetVariable("textord_min_xheight", "8");
-                _tessEngine.SetVariable("textord_min_linesize", "1.5");
-                _tessEngine.SetVariable("tessedit_pageseg_mode", "6"); // Uniform block of text
-                LogMessage("✅ Initialized Tesseract engine with colored CAPTCHA-optimized settings");
+                
+                // Additional settings for better captcha recognition
+                _tessEngine.SetVariable("tessedit_char_blacklist", ""); // No blacklist
+                _tessEngine.SetVariable("classify_enable_learning", "0"); // Disable learning
+                _tessEngine.SetVariable("textord_debug_tabfind", "0"); // Disable debug
+                _tessEngine.SetVariable("tessedit_write_images", "0"); // Don't write debug images
+                _tessEngine.SetVariable("tessedit_create_hocr", "0"); // Don't create hOCR
+                _tessEngine.SetVariable("tessedit_create_tsv", "0"); // Don't create TSV
+                _tessEngine.SetVariable("tessedit_create_pdf", "0"); // Don't create PDF
+                
+                // Font-specific settings
+                _tessEngine.SetVariable("textord_min_xheight", "8"); // Minimum character height
+                _tessEngine.SetVariable("textord_old_xheight", "0"); // Use new xheight calculation
+                _tessEngine.SetVariable("textord_min_linesize", "2.5"); // Minimum line size
+                
+                LogMessage("✅ Initialized Tesseract engine with optimized captcha settings");
             }
             catch (Exception ex)
             {
                 LogMessage($"❌ Failed to initialize Tesseract: {ex.Message}");
+            }
+        }
+
+        private void InitializeGameCaptchaSolver()
+        {
+            try
+            {
+                _gameCaptchaSolver = new GameCaptchaSolver("./tessdata", LogMessage);
+                LogMessage("✅ Initialized GameCaptchaSolver with DPI 300");
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Failed to initialize GameCaptchaSolver: {ex.Message}");
             }
         }
 
@@ -573,12 +597,8 @@ namespace langla_duky
                 _manualCapture = new ManualCaptchaCapture(_config);
                 LogMessage($"Config flags: Manual={_config.UseManualCapture}, Abs={_config.UseAbsoluteCoordinates}, Rel={_config.UseRelativeCoordinates}");
                 LogMessage($"Config values: UseManualCapture={_config.UseManualCapture}, UseAbsoluteCoordinates={_config.UseAbsoluteCoordinates}, UseRelativeCoordinates={_config.UseRelativeCoordinates}");
-                // Masked key logging
-                var key = _config.OCRSettings?.CapSolverAPIKey ?? string.Empty;
-                if (!string.IsNullOrEmpty(key))
-                {
-                    LogMessage($"CapSolver API key: {MaskKey(key)}");
-                }
+                // OCR settings logging
+                LogMessage($"OCR Settings: TessdataPath={_config.OCRSettings?.TessdataPath}, Language={_config.OCRSettings?.Language}");
                 // Update UI but suppress checkbox events to prevent config override
                 _suppressManualEvents = true;
                 UpdateUIForWindowState();
@@ -918,6 +938,7 @@ namespace langla_duky
             _statusTimer?.Dispose();
             _previewTimer?.Dispose();
             try { _tessEngine?.Dispose(); } catch { }
+            try { _gameCaptchaSolver?.Dispose(); } catch { }
             base.OnFormClosing(e);
         }
 
@@ -1785,7 +1806,24 @@ namespace langla_duky
                         if (colors.Count <= 2)
                         {
                             LogMessage("⚠️ WARNING: Image appears to be mostly solid color - may not contain captcha text!");
+                        LogMessage("💡 SUGGESTION: Check if captcha area coordinates are correct in config.json");
+                        LogMessage("💡 SUGGESTION: Try enabling AutoDetectCaptchaArea or use manual capture");
+                    }
+                    
+                    // Additional debug: Check for any non-white pixels
+                    int nonWhitePixels = 0;
+                    for (int x = 0; x < bmp.Width; x += 5)
+                    {
+                        for (int y = 0; y < bmp.Height; y += 5)
+                        {
+                            var pixel = bmp.GetPixel(x, y);
+                            if (pixel.R < 240 || pixel.G < 240 || pixel.B < 240)
+                            {
+                                nonWhitePixels++;
+                            }
                         }
+                    }
+                    LogMessage($"🔍 Non-white pixels found: {nonWhitePixels} (sampled every 5px)");
                     }
                 }
                 return croppedImage;
@@ -1797,17 +1835,152 @@ namespace langla_duky
             }
         }
 
-        private string? SolveCaptchaWithOpenCVAndTesseract(Bitmap bmp)
+    private string? SolveCaptchaWithOpenCVAndTesseract(Bitmap bmp)
+    {
+        try
         {
-            // Per CAPTCHA_PROCESSING_PROMPT.md, this now delegates to the 4-digit processor.
-            var processor = new Captcha4DigitProcessor("./tessdata");
-            string result = processor.ProcessCaptcha4Digits(bmp);
+            LogMessage("🔍 Starting GameCaptchaSolver with DPI 300...");
             
-            // The new processor returns "" for failure, which is equivalent to the old null/empty.
-            // We can log the chosen method for consistency, although it's now fixed.
-            _lastOcrMethod = "4DigitProcessor"; 
+            if (_gameCaptchaSolver == null)
+            {
+                LogMessage("❌ GameCaptchaSolver is not initialized");
+                return string.Empty;
+            }
             
-            return result;
+            // Convert Bitmap to Mat for GameCaptchaSolver
+            using var mat = BitmapConverter.ToMat(bmp);
+            
+            // Use GameCaptchaSolver to solve captcha
+            var result = _gameCaptchaSolver.SolveCaptcha(mat);
+            
+            if (result.Success && !string.IsNullOrEmpty(result.Text))
+            {
+                LogMessage($"✅ GameCaptchaSolver success: '{result.Text}' (Confidence: {result.Confidence:F1}%, Method: {result.Method})");
+                _lastOcrMethod = $"GameCaptchaSolver-{result.Method}";
+                return result.Text;
+            }
+            else
+            {
+                LogMessage($"❌ GameCaptchaSolver failed: {result.Error}");
+                return string.Empty;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"❌ GameCaptchaSolver error: {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    private string ProcessWithTesseract(Bitmap bmp)
+    {
+        try
+        {
+            if (_tessEngine == null)
+            {
+                LogMessage("❌ Tesseract engine is null");
+                return string.Empty;
+            }
+            
+            using (var pix = PixConverter.ToPix(bmp))
+            {
+                using (var page = _tessEngine.Process(pix))
+                {
+                    string result = page.GetText()?.Trim() ?? string.Empty;
+                    LogMessage($"Tesseract raw result: '{result}'");
+                    
+                    // Get confidence score
+                    float confidence = page.GetMeanConfidence();
+                    LogMessage($"Tesseract confidence: {confidence:F2}%");
+                    
+                    // Debug: Get detailed result info
+                    LogMessage($"Tesseract raw result length: {result.Length}");
+                    LogMessage($"Tesseract raw result chars: [{string.Join(", ", result.Select(c => $"'{c}'"))}]");
+                    
+                    // Clean and validate result - keep only letters and numbers
+                    result = new string(result.Where(c => char.IsLetterOrDigit(c)).ToArray());
+                    LogMessage($"Tesseract cleaned result: '{result}'");
+                    
+                    // Accept results with 2-10 characters (ignore confidence for now)
+                    if (result.Length >= 2 && result.Length <= 10)
+                    {
+                        LogMessage($"✅ Tesseract success: '{result}' (confidence: {confidence:F2}%)");
+                        return result;
+                    }
+                    else
+                    {
+                        LogMessage($"❌ Tesseract result too short/long: '{result}' (length: {result.Length})");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"❌ Tesseract error: {ex.Message}");
+        }
+        
+        return string.Empty;
+    }
+
+    private string ProcessWithTesseractMultiplePSM(Bitmap bmp)
+    {
+        try
+        {
+            if (_tessEngine == null)
+            {
+                LogMessage("❌ Tesseract engine is null");
+                return string.Empty;
+            }
+            
+            // Try different PSM modes
+            int[] psmModes = { 6, 7, 8, 13 }; // Single uniform block, Single text line, Single word, Raw line
+            
+            foreach (int psm in psmModes)
+            {
+                try
+                {
+                    LogMessage($"🔍 Trying PSM mode {psm}...");
+                    
+                    // Set PSM mode
+                    _tessEngine.SetVariable("tessedit_pageseg_mode", psm.ToString());
+                    
+                    using (var pix = PixConverter.ToPix(bmp))
+                    {
+                        using (var page = _tessEngine.Process(pix))
+                        {
+                            string result = page.GetText()?.Trim() ?? string.Empty;
+                            float confidence = page.GetMeanConfidence();
+                            
+                            LogMessage($"PSM {psm}: raw='{result}', confidence={confidence:F2}%");
+                            
+                            if (!string.IsNullOrEmpty(result))
+                            {
+                                // Clean and validate result
+                                result = new string(result.Where(c => char.IsLetterOrDigit(c)).ToArray());
+                                
+                                if (result.Length >= 2 && result.Length <= 10)
+                                {
+                                    LogMessage($"✅ PSM {psm} success: '{result}' (confidence: {confidence:F2}%)");
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"❌ PSM {psm} error: {ex.Message}");
+                }
+            }
+            
+            LogMessage("❌ All PSM modes failed");
+            return string.Empty;
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"❌ Multiple PSM error: {ex.Message}");
+            return string.Empty;
+        }
         }
 
         private string TryOCR(Mat binaryMat, string method)

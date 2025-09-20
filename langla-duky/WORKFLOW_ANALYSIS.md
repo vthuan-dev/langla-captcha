@@ -1,104 +1,104 @@
-# Phân Tích Workflow Tool Captcha
+# Workflow Analysis từ Log
 
-## 📊 Workflow Hiện Tại
+## 📊 Phân tích Workflow
 
-### Phase 1: Initialization
-1. **MainForm khởi động** → Load config → Init services
-2. **User chọn game window** → "Duke Client - By iamDuke"
-3. **Start preview** → Hiển thị game window realtime
-
-### Phase 2: Detection (One-shot Mode)
-1. **User click Start** → Chạy one-shot detection (không continuous)
-2. **CaptchaAutomationService.CheckForCaptchaAsync()**
-   - Timeout: 5 giây
-   - Gọi CaptchaMonitoringService
-
-3. **CaptchaMonitoringService.CheckForCaptchaDialogAsync()**
-   - Method 1: Pattern matching - Check dialog UI
-   - Method 2: Area changes - So sánh screenshot
-   - Method 3: Color pattern - Phân tích màu captcha
-   - Method 4: Direct OCR ✅ - **DETECTED HERE**
-
-### Phase 3: Processing 
-1. **CaptchaAutomationService.ProcessCaptchaAsync()**
-   - Load config ✅
-   - Validate window ✅
-   - Get window bounds (1280x750) ✅
-   - **❌ TREO TẠI: Capture full window** (Line 137-138)
-
-## 🔴 Vấn Đề Chính
-
-### Nguyên nhân treo:
-1. **ScreenCapture.CaptureWindowClientArea()** không có timeout
-2. **PrintWindow API** có thể bị block với game window
-3. **Fallback to CopyFromScreen** cũng có thể fail
-
-### Log timeline:
+### **1. Initialization Phase** ✅
 ```
-14:16:12 - Window bounds: 1280x750
-14:18:12 - ProcessCaptcha: Canceled (2 phút timeout!)
+[03:38:21] ✅ Initialized Tesseract engine with optimized captcha settings
+[03:38:23] Selected window: Duke Client - By iamDuke (1288x786)
+[03:38:24] Config: AutoDetectCaptchaArea enabled on Start.
 ```
+**Status:** Tất cả thành công
 
-## 🛠️ Đã Sửa
-
-1. **Thêm timeout 5 giây cho screen capture**
-2. **Wrap trong Task.Run** để chạy background
-3. **Proper error handling** với try-catch
-
-## 📝 Config Hiện Tại
-
-```json
-{
-  "UseAbsoluteCoordinates": true,
-  "CaptchaArea": {
-    "X": 669, "Y": 451,
-    "Width": 199, "Height": 73
-  },
-  "OCRSettings": {
-    "UseOCRAPI": true,
-    "OCRAPIKey": "K87601025288957"
-  }
-}
+### **2. Configuration Loading** ✅
 ```
-
-## 🚀 Workflow Đề Xuất
-
-### Cải thiện Performance:
-1. **Giảm window capture size** - Chỉ capture vùng cần thiết
-2. **Cache window handle** - Tránh lookup nhiều lần
-3. **Parallel OCR** - Chạy multiple OCR methods đồng thời
-4. **Smart retry** - Retry với different capture methods
-
-### Monitoring Improvements:
-1. **Adaptive interval** - Tăng/giảm tần suất check
-2. **Smart detection** - Học pattern của captcha
-3. **Resource pooling** - Reuse bitmap objects
-
-## 📊 Flow Diagram
-
+[03:38:24] DEBUG: Loaded config - UseManual=False, AutoDetect=True, UseAbs=False, UseRel=True
+[03:38:24] OCR Settings: TessdataPath=./tessdata, Language=eng
 ```
-User Click Start
-    ↓
-CheckForCaptchaAsync (5s timeout)
-    ↓
-4 Detection Methods (parallel)
-    ↓
-If Detected → ProcessCaptchaAsync
-    ↓
-Capture Window (5s timeout) ← FIXED
-    ↓
-Crop Captcha Area
-    ↓
-OCR (API or Tesseract)
-    ↓
-Input Text → Click Confirm
-    ↓
-Verify Response
+**Status:** Config được load thành công với AutoDetect enabled
+
+### **3. Captcha Detection & Capture** ✅
+```
+[03:38:25] 🎯 ROI Detection: Color Analysis, Confidence: 58.7%, Time: 183ms
+[03:38:25] ROI method: auto-detect (client) area={X=432,Y=218,Width=160,Height=60}
+[03:38:25] 📐 Captured area: X=412, Y=208, W=200, H=80
+[03:38:25] 🔍 Non-white pixels found: 278 (sampled every 5px)
+```
+**Status:** AutoDetect hoạt động tốt, capture được ảnh có content
+
+### **4. OpenCV Processing** ✅
+```
+[03:38:25] ✅ Converted to grayscale
+[03:38:25] ✅ Applied best threshold with 802 non-white pixels
+[03:38:25] ✅ Applied noise reduction
+[03:38:25] ✅ Upscaled normal image by 8x: 200x80 -> 1600x640
+```
+**Status:** OpenCV xử lý thành công, upscale 8x
+
+### **5. Image Analysis** ✅
+```
+[03:38:25] 🔍 Debug: Image size: 1600x640
+[03:38:25] 🔍 Debug: Found 4323 dark pixels (sampled every 10px)
+```
+**Status:** Ảnh có nhiều dark pixels (4323) - có text
+
+### **6. Tesseract Processing** ❌
+```
+[03:38:26] Tesseract raw result: ''
+[03:38:26] Tesseract confidence: 0.95%
+[03:38:26] Tesseract cleaned result: ''
+[03:38:26] ❌ Tesseract result too short/long: '' (length: 0)
+```
+**Status:** Tesseract không đọc được gì, cả normal và inverted image
+
+## 🔍 Vấn đề chính
+
+### **✅ Những gì hoạt động tốt:**
+1. **AutoDetect:** Tìm được captcha area với confidence 58.7%
+2. **Capture:** Lấy được ảnh 200x80 với 278 non-white pixels
+3. **OpenCV:** Xử lý thành công, upscale 8x → 1600x640
+4. **Image Analysis:** Tìm được 4323 dark pixels (có text)
+
+### **❌ Vấn đề:**
+**Tesseract không đọc được ảnh có text**
+- Ảnh có 4323 dark pixels (có text)
+- Tesseract confidence chỉ 0.95%
+- Cả normal và inverted image đều fail
+
+## 🎯 Nguyên nhân có thể
+
+### **1. Tesseract Settings không phù hợp**
+- Page segmentation mode: 7 (Single text line)
+- OCR engine mode: 0 (Legacy + LSTM)
+- Có thể cần thử different modes
+
+### **2. Ảnh có noise quá nhiều**
+- Upscale 8x có thể tạo noise
+- Background phức tạp (màu nâu: R=134, G=66, B=25)
+
+### **3. Character recognition issues**
+- Font không được Tesseract nhận diện tốt
+- Text quá nhỏ hoặc distorted
+
+## 🛠️ Giải pháp đề xuất
+
+### **1. Thử different Tesseract settings:**
+```csharp
+_tessEngine.SetVariable("tessedit_pageseg_mode", "6"); // Single uniform block
+_tessEngine.SetVariable("tessedit_pageseg_mode", "13"); // Raw line
+_tessEngine.SetVariable("tessedit_ocr_engine_mode", "2"); // Legacy only
 ```
 
-## 🎯 Success Metrics
+### **2. Thử different preprocessing:**
+- Giảm scale factor từ 8x xuống 4x
+- Thử different threshold values
+- Thử different noise reduction
 
-- Detection rate: ~90% (cần test thêm)
-- Processing time: 2-5 seconds (target)
-- Success rate: Unknown (cần verify response)
-- Resource usage: Medium (cần optimize bitmap)
+### **3. Debug ảnh processed:**
+- Kiểm tra ảnh `captcha_processed_*.png`
+- Xem text có rõ không
+- Có thể cần manual threshold
+
+## 📈 Kết luận
+
+**Workflow hoạt động tốt đến 95%** - chỉ có Tesseract OCR là vấn đề. Cần điều chỉnh Tesseract settings hoặc preprocessing để đọc được text từ ảnh đã xử lý tốt.
