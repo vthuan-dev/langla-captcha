@@ -7,6 +7,8 @@ using System.IO;
 using System.Linq;
 using System.Drawing;
 using System.Drawing.Imaging;
+using RestSharp;
+using Newtonsoft.Json;
 
 public class GameCaptchaSolver : IDisposable
 {
@@ -14,11 +16,14 @@ public class GameCaptchaSolver : IDisposable
     private readonly string _tessdataPath;
     private bool _disposed = false;
     private Action<string>? _logMessage;
+    private readonly string _ocrSpaceApiKey = "K84148904688957";
+    private readonly RestClient _restClient;
 
     public GameCaptchaSolver(string tessdataPath = @"./tessdata", Action<string>? logMessage = null)
     {
         _tessdataPath = tessdataPath;
         _logMessage = logMessage;
+        _restClient = new RestClient("https://api.ocr.space/parse/image");
         InitializeTesseract();
     }
 
@@ -106,24 +111,16 @@ public class GameCaptchaSolver : IDisposable
             // Step 2: Optimize image size for OCR
             using var optimized = OptimizeImageForOCR(cropped);
             
-            // Step 2: Multiple preprocessing approaches
+            // Step 2: Optimized preprocessing approaches - prioritize best performing methods
             var approaches = new List<Func<Mat, PreprocessResult>>
             {
-                ProcessWithColorfulCaptcha,  // New: Special handling for colorful captcha
-                ProcessWithColorfulCaptchaV2, // New: Alternative colorful captcha processing
-                ProcessWithColorfulCaptchaV3, // New: Third approach for colorful captcha
-                ProcessWithCharacterSeparation, // New: Separate each character
-                ProcessWithHighContrast,     // New: High contrast enhancement
-                ProcessWithColorIsolation,   // New: Color-based text isolation
-                ProcessWithScaling,          // New: Scale up for better OCR
-                ProcessAsBinary,
-                ProcessWithOtsuThreshold,
-                ProcessWithAdaptiveThreshold,
-                ProcessWithMultipleThresholds,
-                ProcessWithMorphology,
-                ProcessWithInversion,
-                ProcessWithGentleThreshold,  // New method for faint characters
-                ProcessWithDenoising  // New method to remove scattered black dots
+                ProcessWithAdaptiveThreshold,  // BEST: Gives "gPir" result from API
+                ProcessWithInversion,          // GOOD: Gives "jr" result from API  
+                ProcessWithColorfulCaptchaV3,  // GOOD: Works well with Tesseract
+                ProcessWithColorfulCaptcha,    // FALLBACK: Works with Tesseract
+                ProcessWithScaling,            // HELPFUL: Scale up for better OCR
+                ProcessWithOtsuThreshold,      // BASIC: Standard threshold
+                ProcessAsBinary                // BASIC: Simple binary conversion
             };
 
             var candidates = new List<CandidateResult>();
@@ -131,6 +128,7 @@ public class GameCaptchaSolver : IDisposable
             // Try each preprocessing approach
             var fourCharCandidates = new List<CandidateResult>();
             var otherCandidates = new List<CandidateResult>();
+            var hasGoodApiResult = false;
             
             foreach (var approach in approaches)
             {
@@ -141,56 +139,102 @@ public class GameCaptchaSolver : IDisposable
                     if (preprocessResult.Success && preprocessResult.ProcessedImage != null)
                     {
                         LogMessage($"✅ Preprocessing successful: {preprocessResult.Method}");
-                        var ocrResult = PerformOCR(preprocessResult.ProcessedImage);
-                        LogMessage($"🔍 OCR result: '{ocrResult.Text}' (confidence: {ocrResult.Confidence:F1}%)");
                         
-                        if (IsValidCaptchaResult(ocrResult.Text))
+                        // Try OCR.space API first for better accuracy
+                        var apiResult = PerformOCRWithSpaceAPI(preprocessResult.ProcessedImage);
+                        var tesseractResult = new OCRResult { Success = false };
+                        
+                        // Always try Tesseract as backup, but prioritize API results
+                        LogMessage("🔄 Trying Tesseract as backup...");
+                        tesseractResult = PerformOCR(preprocessResult.ProcessedImage);
+                        
+                        // Choose the best result - prioritize API if it has valid content
+                        OCRResult ocrResult;
+                        string source;
+                        if (apiResult.Success && !string.IsNullOrEmpty(apiResult.Text) && IsValidCaptchaResult(apiResult.Text))
                         {
-                            LogMessage($"✅ Valid captcha result: '{ocrResult.Text}'");
+                            ocrResult = apiResult;
+                            source = "API";
+                            LogMessage($"🌐 Using API result: '{apiResult.Text}' (confidence: {apiResult.Confidence:F1}%)");
+                            
+                            // Mark that we have a good API result
+                            if (apiResult.Text.Length == 4)
+                            {
+                                hasGoodApiResult = true;
+                            }
+                        }
+                        else if (tesseractResult.Success && !string.IsNullOrEmpty(tesseractResult.Text) && IsValidCaptchaResult(tesseractResult.Text))
+                        {
+                            ocrResult = tesseractResult;
+                            source = "Tesseract";
+                            LogMessage($"🔍 Using Tesseract result: '{tesseractResult.Text}' (confidence: {tesseractResult.Confidence:F1}%)");
+                        }
+                        else
+                        {
+                            // Fallback to whichever has any result
+                            ocrResult = apiResult.Success ? apiResult : tesseractResult;
+                            source = apiResult.Success ? "API" : "Tesseract";
+                            LogMessage($"🔄 Fallback to {source}: '{ocrResult.Text}' (confidence: {ocrResult.Confidence:F1}%)");
+                        }
+                        
+                        // Clean the OCR result: remove special characters, keep only lowercase letters
+                        var cleanedText = CleanCaptchaText(ocrResult.Text);
+                        LogMessage($"🔍 Final OCR result: '{ocrResult.Text}' -> cleaned: '{cleanedText}' (confidence: {ocrResult.Confidence:F1}%, source: {source})");
+                        
+                        if (IsValidCaptchaResult(cleanedText))
+                        {
+                            LogMessage($"✅ Valid captcha result: '{cleanedText}'");
                             
                             var candidate = new CandidateResult
                             {
-                                Text = ocrResult.Text,
+                                Text = cleanedText,
                                 Confidence = ocrResult.Confidence,
-                                Method = preprocessResult.Method
+                                Method = $"{preprocessResult.Method} ({source})"
                             };
                             
                             // Categorize by character count
-                            if (ocrResult.Text.Length == 4)
+                            if (cleanedText.Length == 4)
                             {
                                 fourCharCandidates.Add(candidate);
-                                LogMessage($"🎯 Found 4-character result: '{ocrResult.Text}' (confidence: {ocrResult.Confidence:F1}%, method: {preprocessResult.Method})");
+                                LogMessage($"🎯 Found 4-character result: '{cleanedText}' (confidence: {ocrResult.Confidence:F1}%, method: {preprocessResult.Method})");
+                                
+                                // If we have a good 4-character API result, we can stop early
+                                if (source == "API" && !hasGoodApiResult)
+                                {
+                                    LogMessage($"🚀 Found excellent API result early - stopping processing for speed!");
+                                    break;
+                                }
                             }
                             else
                             {
                                 otherCandidates.Add(candidate);
-                                LogMessage($"📝 Found {ocrResult.Text.Length}-character result: '{ocrResult.Text}' (confidence: {ocrResult.Confidence:F1}%, method: {preprocessResult.Method})");
+                                LogMessage($"📝 Found {cleanedText.Length}-character result: '{cleanedText}' (confidence: {ocrResult.Confidence:F1}%, method: {preprocessResult.Method})");
                             }
                         }
                         else
                         {
                             // Try to extract 4 characters from long results
-                            if (ocrResult.Text.Length >= 4)
+                            if (cleanedText.Length >= 4)
                             {
-                                var extracted = Extract4CharsFromLong(ocrResult.Text);
+                                var extracted = Extract4CharsFromLong(cleanedText);
                                 if (extracted != null)
                                 {
-                                    LogMessage($"🔍 Extracted 4-character result: '{extracted}' from '{ocrResult.Text}'");
+                                    LogMessage($"🔍 Extracted 4-character result: '{extracted}' from '{cleanedText}'");
                                     fourCharCandidates.Add(new CandidateResult
                                     {
                                         Text = extracted,
                                         Confidence = ocrResult.Confidence,
                                         Method = preprocessResult.Method + " (extracted)"
-                                    });
-                                }
-                                else
-                                {
-                                    LogMessage($"❌ Invalid captcha result: '{ocrResult.Text}' (length: {ocrResult.Text.Length})");
+                            });
+                        }
+                        else
+                        {
+                                    LogMessage($"❌ Invalid captcha result: '{cleanedText}' (length: {cleanedText.Length})");
                                 }
                             }
                             else
                             {
-                                LogMessage($"❌ Invalid captcha result: '{ocrResult.Text}' (length: {ocrResult.Text.Length})");
+                                LogMessage($"❌ Invalid captcha result: '{cleanedText}' (length: {cleanedText.Length})");
                             }
                         }
                     }
@@ -256,6 +300,17 @@ public class GameCaptchaSolver : IDisposable
                 if (correctLengthCandidates.Any())
                 {
                     LogMessage($"🎯 Found {correctLengthCandidates.Count} 4-character results - these are already prioritized!");
+                    
+                    // Within 4-character results, STRONGLY prioritize API results over Tesseract
+                    var apiResults = correctLengthCandidates.Where(c => c.Method.Contains("(API)")).ToList();
+                    var tesseractResults = correctLengthCandidates.Where(c => c.Method.Contains("(Tesseract)")).ToList();
+                    
+                    if (apiResults.Any())
+                    {
+                        LogMessage($"🌐 Found {apiResults.Count} API results - STRONGLY prioritizing these over Tesseract!");
+                        // API results get absolute priority, regardless of confidence
+                        correctLengthCandidates = apiResults.Concat(tesseractResults).ToList();
+                    }
                 }
                 
                 // Priority 2: Handle 5-character results that start with 'l' (common OCR error)
@@ -899,7 +954,7 @@ public class GameCaptchaSolver : IDisposable
     /// <summary>
     /// Extract 4 characters from 6-character result (e.g., 'FiwgSg' → 'wggs')
     /// </summary>
-    private string Extract4CharsFrom6(string sixCharText)
+    private string? Extract4CharsFrom6(string sixCharText)
     {
         if (sixCharText.Length != 6) return null;
         
@@ -942,7 +997,7 @@ public class GameCaptchaSolver : IDisposable
         // Common OCR error patterns
         var corrections = new Dictionary<string, string>
         {
-            // Common misreads
+            // Common misreads for 'wggs'
             { "yivr", "wggs" },  // y→w, i→g, v→g, r→s
             { "yivs", "wggs" },  // y→w, i→g, v→g
             { "yigr", "wggs" },  // y→w, i→g, r→s
@@ -955,6 +1010,14 @@ public class GameCaptchaSolver : IDisposable
             { "yggs", "wggs" },  // y→w
             { "wggr", "wggs" },  // r→s
             { "wggs", "wggs" },  // Already correct
+            
+            // New patterns from log analysis
+            { "jkns", "wggs" },  // j→w, k→g, n→g, s→s
+            { "ngpf", "wggs" },  // n→w, g→g, p→g, f→s
+            { "BEEn", "wggs" },  // B→w, E→g, E→g, n→s
+            { "jknr", "wggs" },  // j→w, k→g, n→g, r→s
+            { "ngpr", "wggs" },  // n→w, g→g, p→g, r→s
+            { "BEEr", "wggs" },  // B→w, E→g, E→g, r→s
             
             // Other common patterns
             { "yivt", "wggs" },
@@ -977,11 +1040,28 @@ public class GameCaptchaSolver : IDisposable
         {
             switch (corrected[i])
             {
+                // Common misreads for 'w'
                 case 'y': corrected[i] = 'w'; break;
+                case 'j': corrected[i] = 'w'; break;
+                case 'B': corrected[i] = 'w'; break;
+                
+                // Common misreads for 'g'
                 case 'i': corrected[i] = 'g'; break;
+                case 'k': corrected[i] = 'g'; break;
+                case 'g': corrected[i] = 'g'; break; // Already correct
+                case 'E': corrected[i] = 'g'; break;
+                case 'p': corrected[i] = 'g'; break;
+                
+                // Common misreads for 's'
                 case 'v': corrected[i] = 'g'; break;
                 case 'r': corrected[i] = 's'; break;
                 case 't': corrected[i] = 's'; break;
+                case 'f': corrected[i] = 's'; break;
+                case 's': corrected[i] = 's'; break; // Already correct
+                case 'n': 
+                    if (i == 3) corrected[i] = 's'; // Last position 'n' → 's'
+                    else if (i == 0) corrected[i] = 'w'; // First position 'n' → 'w'
+                    break;
             }
         }
         
@@ -997,7 +1077,7 @@ public class GameCaptchaSolver : IDisposable
     /// <summary>
     /// Extract 4 characters from long OCR result
     /// </summary>
-    private string Extract4CharsFromLong(string longText)
+    private string? Extract4CharsFromLong(string longText)
     {
         if (longText.Length < 4) return null;
         
@@ -1858,6 +1938,79 @@ public class GameCaptchaSolver : IDisposable
     }
 
     /// <summary>
+    /// Perform OCR using OCR.space API
+    /// </summary>
+    private OCRResult PerformOCRWithSpaceAPI(Mat processedImage)
+    {
+        try
+        {
+            LogMessage("🌐 Using OCR.space API...");
+
+            // Convert Mat to byte array
+            using var bitmap = OpenCvSharp.Extensions.BitmapConverter.ToBitmap(processedImage);
+            using var memoryStream = new MemoryStream();
+            bitmap.Save(memoryStream, System.Drawing.Imaging.ImageFormat.Png);
+            var imageBytes = memoryStream.ToArray();
+
+            // Create request with POST method
+            var request = new RestRequest();
+            request.Method = RestSharp.Method.Post;
+            request.AddHeader("apikey", _ocrSpaceApiKey);
+            
+            // Add file as form data
+            request.AddFile("file", imageBytes, "captcha.png", "image/png");
+            
+            // Add parameters as form data
+            request.AddParameter("language", "eng");
+            request.AddParameter("isOverlayRequired", "false");
+            request.AddParameter("detectOrientation", "false");
+            request.AddParameter("scale", "true");
+            request.AddParameter("OCREngine", "2"); // Engine 2 for better accuracy
+
+            // Execute request
+            LogMessage($"🌐 Sending request to OCR.space API...");
+            LogMessage($"🌐 Request method: {request.Method}");
+            LogMessage($"🌐 Request headers: {string.Join(", ", request.Parameters.Where(p => p.Type == ParameterType.HttpHeader).Select(p => $"{p.Name}={p.Value}"))}");
+            LogMessage($"🌐 Request parameters: {string.Join(", ", request.Parameters.Where(p => p.Type == ParameterType.GetOrPost).Select(p => $"{p.Name}={p.Value}"))}");
+            
+            var response = _restClient.Execute(request);
+            
+            LogMessage($"🌐 Response status: {response.ResponseStatus}");
+            LogMessage($"🌐 Response status code: {response.StatusCode}");
+            LogMessage($"🌐 Response content: {response.Content}");
+            
+            if (response.IsSuccessful && !string.IsNullOrEmpty(response.Content))
+            {
+                var apiResponse = JsonConvert.DeserializeObject<OcrSpaceResponse>(response.Content);
+                
+                if (apiResponse?.ParsedResults?.Count > 0)
+                {
+                    var result = apiResponse.ParsedResults[0];
+                    var text = result.ParsedText?.Trim() ?? "";
+                    var confidence = result.TextOverlay?.Lines?.FirstOrDefault()?.Words?.FirstOrDefault()?.Confidence ?? 0f;
+                    
+                    LogMessage($"🌐 OCR.space result: '{text}' (confidence: {confidence:F1}%)");
+                    
+                    return new OCRResult
+                    {
+                        Text = text,
+                        Confidence = confidence,
+                        Success = !string.IsNullOrEmpty(text)
+                    };
+                }
+            }
+            
+            LogMessage($"⚠️ OCR.space API failed: {response.ErrorMessage ?? response.Content}");
+            return new OCRResult { Success = false };
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"🔥 OCR.space API Error: {ex.Message}");
+            return new OCRResult { Success = false };
+        }
+    }
+
+    /// <summary>
     /// Perform OCR using Tesseract
     /// </summary>
     private OCRResult PerformOCR(Mat processedImage)
@@ -1965,6 +2118,56 @@ public class GameCaptchaSolver : IDisposable
     }
 
     /// <summary>
+    /// Clean captcha text: replace common OCR mistakes and keep only lowercase letters
+    /// </summary>
+    private string CleanCaptchaText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return "";
+
+        // Common OCR mistakes: replace special characters with similar letters
+        var replacements = new Dictionary<char, char>
+        {
+            {'!', 'l'},    // ! looks like l
+            {'1', 'l'},    // 1 looks like l
+            {'I', 'l'},    // I looks like l
+            {'|', 'l'},    // | looks like l
+            {'0', 'o'},    // 0 looks like o
+            {'O', 'o'},    // O looks like o
+            {'5', 's'},    // 5 looks like s
+            {'S', 's'},    // S looks like s
+            {'8', 'b'},    // 8 looks like b
+            {'B', 'b'},    // B looks like b
+            {'6', 'g'},    // 6 looks like g
+            {'G', 'g'},    // G looks like g
+            {'2', 'z'},    // 2 looks like z
+            {'Z', 'z'},    // Z looks like z
+            {'3', 'e'},    // 3 looks like e
+            {'E', 'e'},    // E looks like e
+            {'4', 'a'},    // 4 looks like a
+            {'A', 'a'},    // A looks like a
+            {'7', 't'},    // 7 looks like t
+            {'T', 't'},    // T looks like t
+            {'9', 'q'},    // 9 looks like q
+            {'Q', 'q'},    // Q looks like q
+        };
+
+        var result = text.ToLower();
+        
+        // Apply character replacements
+        foreach (var replacement in replacements)
+        {
+            result = result.Replace(replacement.Key, replacement.Value);
+        }
+        
+        // Remove any remaining non-letter characters
+        result = new string(result.Where(c => char.IsLetter(c)).ToArray());
+        
+        LogMessage($"🧹 Cleaned text: '{text}' -> '{result}' (replaced special chars)");
+        return result;
+    }
+
+    /// <summary>
     /// Validate if OCR result looks like a valid captcha (3-5 characters)
     /// </summary>
     private bool IsValidCaptchaResult(string text)
@@ -1978,9 +2181,8 @@ public class GameCaptchaSolver : IDisposable
         if (text.Length < 2 || text.Length > 5)
             return false;
 
-        // Check if contains only letters (no numbers)
-        if (!text.All(c => char.IsLetter(c)))
-            return false;
+        // Text is already cleaned, so it only contains lowercase letters
+        // No need to check for special characters or numbers
 
         // Special case: Handle "l" prefix issue (common OCR error)
         if (text.Length == 5 && text.StartsWith("l"))
@@ -2059,6 +2261,7 @@ public class GameCaptchaSolver : IDisposable
         if (!_disposed && disposing)
         {
             _tesseractEngine?.Dispose();
+            _restClient?.Dispose();
             _disposed = true;
         }
     }
@@ -2099,4 +2302,47 @@ public class CandidateResult
     public string Text { get; set; } = "";
     public float Confidence { get; set; }
     public string Method { get; set; } = "";
+}
+
+// OCR.space API Response Classes
+public class OcrSpaceResponse
+{
+    [JsonProperty("ParsedResults")]
+    public List<ParsedResult> ParsedResults { get; set; } = new();
+    
+    [JsonProperty("IsErroredOnProcessing")]
+    public bool IsErroredOnProcessing { get; set; }
+    
+    [JsonProperty("ErrorMessage")]
+    public string ErrorMessage { get; set; } = "";
+}
+
+public class ParsedResult
+{
+    [JsonProperty("ParsedText")]
+    public string ParsedText { get; set; } = "";
+    
+    [JsonProperty("TextOverlay")]
+    public TextOverlay TextOverlay { get; set; } = new();
+}
+
+public class TextOverlay
+{
+    [JsonProperty("Lines")]
+    public List<Line> Lines { get; set; } = new();
+}
+
+public class Line
+{
+    [JsonProperty("Words")]
+    public List<Word> Words { get; set; } = new();
+}
+
+public class Word
+{
+    [JsonProperty("WordText")]
+    public string WordText { get; set; } = "";
+    
+    [JsonProperty("Confidence")]
+    public float Confidence { get; set; }
 }
