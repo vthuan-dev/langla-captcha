@@ -4,8 +4,8 @@
   "CaptchaArea": {
     "X": 0,
     "Y": 0,
-    "Width": 200,
-    "Height": 60
+    "Width": 20,
+    "Height": 6
   },
   "InputFieldPosition": {
     "X": 640,
@@ -18,10 +18,10 @@
   "UseAbsoluteCoordinates": false,
   "UseRelativeCoordinates": true,
   "AutoDetectCaptchaArea": true,
-  "CaptchaLeftX": 0,
-  "CaptchaTopY": 0,
-  "CaptchaRightX": 200,
-  "CaptchaBottomY": 60,
+  "CaptchaLeftX": 610,
+  "CaptchaTopY": 304,
+  "CaptchaRightX": 630,
+  "CaptchaBottomY": 310,
   "InputFieldX": 640,
   "InputFieldY": 430,
   "ConfirmButtonX": 640,

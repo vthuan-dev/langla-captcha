@@ -1692,11 +1692,11 @@ namespace langla_duky
             // Draw ROI rectangle on screen for debugging before capture
             DrawROIRectangle(area, "Detected ROI");
             
-            // Slightly pad the detected ROI to avoid cutting off glyph edges
+            // Minimal padding for very small images to avoid cutting off glyph edges
             try
             {
-                int padX = Math.Max(2, area.Width / 8);   // ~12.5%
-                int padY = Math.Max(2, area.Height / 6);  // ~16%
+                int padX = Math.Max(1, area.Width / 35);   // ~2.9% for very small images
+                int padY = Math.Max(1, area.Height / 30);   // ~3.3% for very small images
                 var padded = new Rectangle(area.X - padX, area.Y - padY, area.Width + padX * 2, area.Height + padY * 2);
 
                 if (_config.UseManualCapture || _config.UseAbsoluteCoordinates)
@@ -1991,9 +1991,9 @@ namespace langla_duky
                 LogMessage($"OCR {method}: Input size {binaryMat.Width}x{binaryMat.Height}");
                 
                 // Resize if too small (Tesseract works better with larger images)
-                if (binaryMat.Width < 200 || binaryMat.Height < 50)
+                if (binaryMat.Width < 30 || binaryMat.Height < 8)
                 {
-                    var scale = Math.Max(200.0 / binaryMat.Width, 50.0 / binaryMat.Height);
+                    var scale = Math.Max(30.0 / binaryMat.Width, 8.0 / binaryMat.Height);
                     var newWidth = (int)(binaryMat.Width * scale);
                     var newHeight = (int)(binaryMat.Height * scale);
                     

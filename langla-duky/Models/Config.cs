@@ -131,7 +131,7 @@ namespace langla_duky.Models
         // Manual capture settings
         public bool UseManualCapture { get; set; } = true;
         [JsonConverter(typeof(RectangleConverter))]
-        public Rectangle ManualCaptchaArea { get; set; } = new Rectangle(0, 0, 200, 60);
+        public Rectangle ManualCaptchaArea { get; set; } = new Rectangle(0, 0, 20, 6);
         [JsonConverter(typeof(PointConverter))]
         public Point ManualInputField { get; set; } = new Point(0, 0);
         [JsonConverter(typeof(PointConverter))]
@@ -144,7 +144,7 @@ namespace langla_duky.Models
         
         // Deprecated: Use ManualCaptchaArea instead
         [JsonConverter(typeof(RectangleConverter))]
-        public Rectangle CaptchaArea { get; set; } = new Rectangle(390, 230, 320, 40);
+        public Rectangle CaptchaArea { get; set; } = new Rectangle(390, 230, 20, 6);
         [JsonConverter(typeof(PointConverter))]
         public Point InputFieldPosition { get; set; } = new Point(650, 430);
         [JsonConverter(typeof(PointConverter))]
@@ -152,16 +152,16 @@ namespace langla_duky.Models
         
         // Relative (client-area based) coordinates [0..1], prioritized if enabled
         public bool UseRelativeCoordinates { get; set; } = true;
-        public RectangleF CaptchaAreaRelative { get; set; } = new RectangleF(0.36f, 0.303f, 0.08f, 0.06f);
+        public RectangleF CaptchaAreaRelative { get; set; } = new RectangleF(0.36f, 0.303f, 0.01f, 0.004f);
         
         // Auto-detect captcha region at runtime (overrides coordinates for the current run)
         public bool AutoDetectCaptchaArea { get; set; } = false;
         
         // Absolute screen coordinates for captcha area (preferred method)
-        public int CaptchaLeftX { get; set; } = 540;
-        public int CaptchaTopY { get; set; } = 280;
-        public int CaptchaRightX { get; set; } = 740;
-        public int CaptchaBottomY { get; set; } = 353;
+        public int CaptchaLeftX { get; set; } = 610;
+        public int CaptchaTopY { get; set; } = 304;
+        public int CaptchaRightX { get; set; } = 630;
+        public int CaptchaBottomY { get; set; } = 310;
         
         // Absolute screen coordinates for input and button
         public int InputFieldX { get; set; } = 650;
