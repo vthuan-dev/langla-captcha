@@ -147,10 +147,52 @@ public class GameCaptchaSolver : IDisposable
                 }
             }
 
-            // Select best result
+            // Select best result with smart logic
             if (candidates.Any())
             {
-                var bestCandidate = candidates.OrderByDescending(c => c.Confidence).First();
+                // Priority 1: Results with exactly 4 characters
+                var correctLengthCandidates = candidates.Where(c => c.Text.Length == 4).ToList();
+                
+                // Priority 2: Handle 5-character results that start with 'l' (common OCR error)
+                var suspiciousCandidates = candidates.Where(c => c.Text.Length == 5 && c.Text.StartsWith("l")).ToList();
+                if (suspiciousCandidates.Any())
+                {
+                    LogMessage($"🔍 Found {suspiciousCandidates.Count} suspicious 5-character results starting with 'l'");
+                    foreach (var candidate in suspiciousCandidates)
+                    {
+                        var trimmed = candidate.Text.Substring(1);
+                        if (trimmed.Length == 4 && trimmed.All(ch => char.IsLetter(ch)))
+                        {
+                            LogMessage($"✅ Adding trimmed candidate: '{trimmed}' (from '{candidate.Text}')");
+                            correctLengthCandidates.Add(new CandidateResult
+                            {
+                                Text = trimmed,
+                                Confidence = candidate.Confidence,
+                                Method = candidate.Method
+                            });
+                        }
+                    }
+                }
+                
+                // Priority 3: Any valid result (3-5 characters)
+                var allValidCandidates = candidates.Where(c => c.Text.Length >= 3 && c.Text.Length <= 5).ToList();
+                
+                CandidateResult bestCandidate;
+                if (correctLengthCandidates.Any())
+                {
+                    bestCandidate = correctLengthCandidates.OrderByDescending(c => c.Confidence).First();
+                    LogMessage($"✅ Selected 4-character result: '{bestCandidate.Text}'");
+                }
+                else if (allValidCandidates.Any())
+                {
+                    bestCandidate = allValidCandidates.OrderByDescending(c => c.Confidence).First();
+                    LogMessage($"✅ Selected valid result: '{bestCandidate.Text}' (length: {bestCandidate.Text.Length})");
+                }
+                else
+                {
+                    bestCandidate = candidates.OrderByDescending(c => c.Confidence).First();
+                    LogMessage($"✅ Selected fallback result: '{bestCandidate.Text}'");
+                }
                 
                 result.Text = bestCandidate.Text.ToLower();
                 result.Confidence = bestCandidate.Confidence;
@@ -789,7 +831,7 @@ public class GameCaptchaSolver : IDisposable
     }
 
     /// <summary>
-    /// Validate if OCR result looks like a valid 4-character letter captcha
+    /// Validate if OCR result looks like a valid captcha (3-5 characters)
     /// </summary>
     private bool IsValidCaptchaResult(string text)
     {
@@ -798,13 +840,24 @@ public class GameCaptchaSolver : IDisposable
 
         text = text.Trim().ToLower();
 
-        // Check length (captcha has exactly 4 characters)
-        if (text.Length != 4)
+        // Check length (captcha has 3-5 characters)
+        if (text.Length < 3 || text.Length > 5)
             return false;
 
         // Check if contains only letters (no numbers)
         if (!text.All(c => char.IsLetter(c)))
             return false;
+
+        // Special case: Handle "l" prefix issue (common OCR error)
+        if (text.Length == 5 && text.StartsWith("l"))
+        {
+            var trimmed = text.Substring(1);
+            if (trimmed.Length == 4 && trimmed.All(c => char.IsLetter(c)))
+            {
+                LogMessage($"✅ Fixed OCR error: '{text}' -> '{trimmed}' (removed 'l' prefix)");
+                return true;
+            }
+        }
 
         return true;
     }
