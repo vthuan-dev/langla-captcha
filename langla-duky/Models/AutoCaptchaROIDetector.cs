@@ -482,5 +482,35 @@ namespace langla_duky.Models
                 Console.WriteLine($"Failed to save debug image: {ex.Message}");
             }
         }
+
+        public void SaveCaptchaTemplate(Mat image, System.Drawing.Rectangle region)
+        {
+            if (!_enableDebugOutput) return;
+
+            try
+            {
+                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                var templatePath = Path.Combine(_debugOutputPath, $"captcha_template_{timestamp}.png");
+                
+                // Crop the captcha region from the image
+                using var captchaRegion = new Mat(image, new OpenCvSharp.Rect(region.X, region.Y, region.Width, region.Height));
+                
+                // Save the template
+                captchaRegion.SaveImage(templatePath);
+                
+                Console.WriteLine($"💾 Captcha template saved: {templatePath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to save captcha template: {ex.Message}");
+            }
+        }
+
+        public void Dispose()
+        {
+            // AutoCaptchaROIDetector doesn't hold any unmanaged resources
+            // This method is implemented to satisfy IDisposable interface
+            // and to prevent compilation errors in dependent classes
+        }
     }
 }

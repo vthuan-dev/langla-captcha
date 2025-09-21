@@ -508,78 +508,8 @@ namespace langla_duky
             // Always reload latest config from file so Start reflects @config.json changes
             try
             {
-                LogMessage($"DEBUG: Environment.CurrentDirectory: {Environment.CurrentDirectory}");
-                LogMessage($"DEBUG: AppDomain.CurrentDomain.BaseDirectory: {AppDomain.CurrentDomain.BaseDirectory}");
-                
-                // Check if config files exist
-                string cwdConfigPath = Path.Combine(Environment.CurrentDirectory, "config.json");
-                string baseDirConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
-                LogMessage($"DEBUG: CWD config path: {cwdConfigPath} (exists: {File.Exists(cwdConfigPath)})");
-                LogMessage($"DEBUG: BaseDir config path: {baseDirConfigPath} (exists: {File.Exists(baseDirConfigPath)})");
-                
-                // Try to load config and see what happens
-                LogMessage("DEBUG: About to call Config.LoadFromFile()");
-                
-                // Let's manually check what ResolveConfigPath would return
-                string manualCwdPath = Path.Combine(Environment.CurrentDirectory, "config.json");
-                string manualBaseDirPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
-                LogMessage($"DEBUG: Manual CWD path: {manualCwdPath} (exists: {File.Exists(manualCwdPath)})");
-                LogMessage($"DEBUG: Manual BaseDir path: {manualBaseDirPath} (exists: {File.Exists(manualBaseDirPath)})");
-                
-                // Try to read the file directly
-                if (File.Exists(manualCwdPath))
-                {
-                    string directContent = File.ReadAllText(manualCwdPath);
-                    LogMessage($"DEBUG: Direct read from CWD: {directContent}");
-                }
-                if (File.Exists(manualBaseDirPath))
-                {
-                    string directContent = File.ReadAllText(manualBaseDirPath);
-                    LogMessage($"DEBUG: Direct read from BaseDir: {directContent}");
-                }
-                
                 var reloaded = Config.LoadFromFile();
-                LogMessage($"DEBUG: Loaded config - UseManual={reloaded.UseManualCapture}, AutoDetect={reloaded.AutoDetectCaptchaArea}, UseAbs={reloaded.UseAbsoluteCoordinates}, UseRel={reloaded.UseRelativeCoordinates}");
-                LogMessage($"DEBUG: Config file path: {reloaded.LoadedPath}");
-                LogMessage($"DEBUG: Config JSON deserialized values: UseManualCapture={reloaded.UseManualCapture}, UseAbsoluteCoordinates={reloaded.UseAbsoluteCoordinates}, UseRelativeCoordinates={reloaded.UseRelativeCoordinates}");
                 
-                // If LoadedPath is null, let's try to manually deserialize the JSON we read earlier
-                if (string.IsNullOrEmpty(reloaded.LoadedPath))
-                {
-                    LogMessage("DEBUG: LoadedPath is null, trying manual deserialization...");
-                    try
-                    {
-                        string manualJson = File.ReadAllText(manualCwdPath);
-                        var manualConfig = JsonConvert.DeserializeObject<Config>(manualJson);
-                        LogMessage($"DEBUG: Manual deserialization result - UseManualCapture={manualConfig?.UseManualCapture}, UseAbsoluteCoordinates={manualConfig?.UseAbsoluteCoordinates}, UseRelativeCoordinates={manualConfig?.UseRelativeCoordinates}");
-                    }
-                    catch (Exception ex)
-                    {
-                        LogMessage($"ERROR: Manual deserialization failed: {ex.Message}");
-                    }
-                }
-                
-                // Check if the loaded path is different from what we expect
-                if (string.IsNullOrEmpty(reloaded.LoadedPath))
-                {
-                    LogMessage("ERROR: Config.LoadedPath is null or empty!");
-                    LogMessage("DEBUG: This means config was created with default values, not loaded from file!");
-                }
-                else
-                {
-                    LogMessage($"DEBUG: Config was loaded from: {reloaded.LoadedPath}");
-                    
-                    // Verify the file content
-                    if (File.Exists(reloaded.LoadedPath))
-                    {
-                        string fileContent = File.ReadAllText(reloaded.LoadedPath);
-                        LogMessage($"DEBUG: File content from {reloaded.LoadedPath}: {fileContent}");
-                    }
-                    else
-                    {
-                        LogMessage($"ERROR: Config.LoadedPath points to non-existent file: {reloaded.LoadedPath}");
-                    }
-                }
                 // Respect the config file settings - don't override them
                 if (reloaded.UseAbsoluteCoordinates)
                 {
@@ -595,10 +525,7 @@ namespace langla_duky
                 }
                 _config = reloaded;
                 _manualCapture = new ManualCaptchaCapture(_config);
-                LogMessage($"Config flags: Manual={_config.UseManualCapture}, Abs={_config.UseAbsoluteCoordinates}, Rel={_config.UseRelativeCoordinates}");
-                LogMessage($"Config values: UseManualCapture={_config.UseManualCapture}, UseAbsoluteCoordinates={_config.UseAbsoluteCoordinates}, UseRelativeCoordinates={_config.UseRelativeCoordinates}");
-                // OCR settings logging
-                LogMessage($"OCR Settings: TessdataPath={_config.OCRSettings?.TessdataPath}, Language={_config.OCRSettings?.Language}");
+                
                 // Update UI but suppress checkbox events to prevent config override
                 _suppressManualEvents = true;
                 UpdateUIForWindowState();
@@ -1559,12 +1486,10 @@ namespace langla_duky
         private Rectangle GetEffectiveCaptchaArea()
         {
             var cfg = _config; // Use in-memory config
-            LogMessage($"DEBUG: GetEffectiveCaptchaArea - UseManual={cfg.UseManualCapture}, AutoDetect={cfg.AutoDetectCaptchaArea}, UseAbs={cfg.UseAbsoluteCoordinates}, UseRel={cfg.UseRelativeCoordinates}");
 
             // Priority 0: Manual Capture (screen coords)
             if (cfg.UseManualCapture)
             {
-                LogMessage("DEBUG: Checking manual capture...");
                 if (_manualCapture != null && _manualCapture.IsValid())
                 {
                     _lastRoiMode = "manual";
@@ -1577,7 +1502,6 @@ namespace langla_duky
             // Priority 1: Advanced Auto-detect at runtime (client coords)
             if (cfg.AutoDetectCaptchaArea && _selectedGameWindow != null && _selectedGameWindow.IsValid())
             {
-                LogMessage("DEBUG: Checking auto-detect...");
                 try
                 {
                     var detected = TryAdvancedAutoDetectCaptchaArea();
@@ -1601,7 +1525,6 @@ namespace langla_duky
             // Priority 2: Absolute screen coordinates
             if (cfg.UseAbsoluteCoordinates)
             {
-                LogMessage("DEBUG: Using absolute coordinates...");
                 var abs = new Rectangle(
                     cfg.CaptchaLeftX,
                     cfg.CaptchaTopY,
@@ -1685,7 +1608,6 @@ namespace langla_duky
         {
             if (_selectedGameWindow == null || !_selectedGameWindow.IsValid()) return null;
             var cfg = _config;
-            LogMessage($"Loaded config: UseManual={cfg.UseManualCapture}, UseAbs={cfg.UseAbsoluteCoordinates}");
             _selectedGameWindow.UpdateBounds();
             var area = GetEffectiveCaptchaArea();
             
@@ -1704,7 +1626,6 @@ namespace langla_duky
                     // Clamp to virtual screen for screen-space capture
                     var screenBounds = System.Windows.Forms.SystemInformation.VirtualScreen;
                     padded = Rectangle.Intersect(padded, screenBounds);
-                    LogMessage($"ROI method: {(_config.UseManualCapture ? "manual" : (_config.UseAbsoluteCoordinates ? "absolute" : "auto-detect"))} (screen) area={area} -> padded={padded}");
                 }
                 else
                 {
@@ -1712,7 +1633,6 @@ namespace langla_duky
                     var cs = GetClientSize(_selectedGameWindow.Handle);
                     var clientRect = new Rectangle(0, 0, cs.Width, cs.Height);
                     padded = Rectangle.Intersect(padded, clientRect);
-                    LogMessage($"ROI method: auto-detect (client) area={area} -> padded={padded}");
                 }
                 
                 // Draw padded ROI rectangle
@@ -1733,7 +1653,6 @@ namespace langla_duky
                     // For screen coordinates, capture the full screen area around the game window
                     var windowBounds = _selectedGameWindow.Bounds;
                     fullWindowImage = ScreenCapture.CaptureScreen(windowBounds);
-                    LogMessage($"📸 Captured full screen area: {windowBounds}");
                 }
                 else
                 {
@@ -1741,7 +1660,6 @@ namespace langla_duky
                     var clientSize = GetClientSize(_selectedGameWindow.Handle);
                     var clientRect = new Rectangle(0, 0, clientSize.Width, clientSize.Height);
                     fullWindowImage = ScreenCapture.CaptureWindowClientArea(_selectedGameWindow.Handle, clientRect);
-                    LogMessage($"📸 Captured full client area: {clientRect}");
                 }
                 
                 if (fullWindowImage == null)
@@ -1760,13 +1678,11 @@ namespace langla_duky
                     var windowBounds = _selectedGameWindow.Bounds;
                     var screenArea = new Rectangle(area.X - windowBounds.X, area.Y - windowBounds.Y, area.Width, area.Height);
                     croppedImage = CropImage(imageWithGrid, screenArea);
-                    LogMessage($"✂️ Cropped from screen coordinates: {screenArea}");
                 }
                 else
                 {
                     // For client coordinates, crop directly from client area
                     croppedImage = CropImage(imageWithGrid, area);
-                    LogMessage($"✂️ Cropped from client coordinates: {area}");
                 }
                 
                 // Clean up full window image
@@ -1785,9 +1701,6 @@ namespace langla_duky
                     LogMessage($"📐 Captured area: X={area.X}, Y={area.Y}, W={area.Width}, H={area.Height}");
                     LogMessage($"💾 Saved captcha image: {_lastCaptchaImagePath}");
                     
-                    // Debug: Show image info
-                    LogMessage($"🔍 Image analysis: Size={croppedImage.Width}x{croppedImage.Height}, PixelFormat={croppedImage.PixelFormat}");
-                    
                     // Check if image is mostly empty (all same color)
                     using (var bmp = new Bitmap(croppedImage))
                     {
@@ -1801,29 +1714,11 @@ namespace langla_duky
                             }
                         }
                         var dominantColor = colors.OrderByDescending(kvp => kvp.Value).FirstOrDefault();
-                        LogMessage($"🎨 Dominant color: {dominantColor.Key} (appears {dominantColor.Value} times)");
                         
                         if (colors.Count <= 2)
                         {
                             LogMessage("⚠️ WARNING: Image appears to be mostly solid color - may not contain captcha text!");
-                        LogMessage("💡 SUGGESTION: Check if captcha area coordinates are correct in config.json");
-                        LogMessage("💡 SUGGESTION: Try enabling AutoDetectCaptchaArea or use manual capture");
-                    }
-                    
-                    // Additional debug: Check for any non-white pixels
-                    int nonWhitePixels = 0;
-                    for (int x = 0; x < bmp.Width; x += 5)
-                    {
-                        for (int y = 0; y < bmp.Height; y += 5)
-                        {
-                            var pixel = bmp.GetPixel(x, y);
-                            if (pixel.R < 240 || pixel.G < 240 || pixel.B < 240)
-                            {
-                                nonWhitePixels++;
-                            }
                         }
-                    }
-                    LogMessage($"🔍 Non-white pixels found: {nonWhitePixels} (sampled every 5px)");
                     }
                 }
                 return croppedImage;
@@ -1839,8 +1734,6 @@ namespace langla_duky
     {
         try
         {
-            LogMessage("🔍 Starting GameCaptchaSolver with DPI 300...");
-            
             if (_gameCaptchaSolver == null)
             {
                 LogMessage("❌ GameCaptchaSolver is not initialized");
@@ -1887,29 +1780,18 @@ namespace langla_duky
                 using (var page = _tessEngine.Process(pix))
                 {
                     string result = page.GetText()?.Trim() ?? string.Empty;
-                    LogMessage($"Tesseract raw result: '{result}'");
                     
                     // Get confidence score
                     float confidence = page.GetMeanConfidence();
-                    LogMessage($"Tesseract confidence: {confidence:F2}%");
-                    
-                    // Debug: Get detailed result info
-                    LogMessage($"Tesseract raw result length: {result.Length}");
-                    LogMessage($"Tesseract raw result chars: [{string.Join(", ", result.Select(c => $"'{c}'"))}]");
                     
                     // Clean and validate result - keep only letters and numbers
                     result = new string(result.Where(c => char.IsLetterOrDigit(c)).ToArray());
-                    LogMessage($"Tesseract cleaned result: '{result}'");
                     
                     // Accept results with 2-10 characters (ignore confidence for now)
                     if (result.Length >= 2 && result.Length <= 10)
                     {
                         LogMessage($"✅ Tesseract success: '{result}' (confidence: {confidence:F2}%)");
                         return result;
-                    }
-                    else
-                    {
-                        LogMessage($"❌ Tesseract result too short/long: '{result}' (length: {result.Length})");
                     }
                 }
             }
@@ -1939,8 +1821,6 @@ namespace langla_duky
             {
                 try
                 {
-                    LogMessage($"🔍 Trying PSM mode {psm}...");
-                    
                     // Set PSM mode
                     _tessEngine.SetVariable("tessedit_pageseg_mode", psm.ToString());
                     
@@ -1950,8 +1830,6 @@ namespace langla_duky
                         {
                             string result = page.GetText()?.Trim() ?? string.Empty;
                             float confidence = page.GetMeanConfidence();
-                            
-                            LogMessage($"PSM {psm}: raw='{result}', confidence={confidence:F2}%");
                             
                             if (!string.IsNullOrEmpty(result))
                             {
@@ -1973,7 +1851,6 @@ namespace langla_duky
                 }
             }
             
-            LogMessage("❌ All PSM modes failed");
             return string.Empty;
         }
         catch (Exception ex)
@@ -1988,8 +1865,6 @@ namespace langla_duky
             Mat processedMat = binaryMat;
             try
             {
-                LogMessage($"OCR {method}: Input size {binaryMat.Width}x{binaryMat.Height}");
-                
                 // Resize if too small (Tesseract works better with larger images)
                 if (binaryMat.Width < 30 || binaryMat.Height < 8)
                 {
@@ -1999,7 +1874,6 @@ namespace langla_duky
                     
                     processedMat = new Mat();
                     Cv2.Resize(binaryMat, processedMat, new OpenCvSharp.Size(newWidth, newHeight), 0, 0, InterpolationFlags.Nearest);
-                    LogMessage($"OCR {method}: Resized to {newWidth}x{newHeight} (scale={scale:F2})");
                 }
 
                 // Save debug image for each method
@@ -2018,28 +1892,22 @@ namespace langla_duky
                     var engine = _tessEngine;
                     if (engine == null) 
                     {
-                        LogMessage($"OCR {method}: Tesseract engine is null");
                         return string.Empty;
                     }
                     
                     using var page = engine.Process(pix);
                     var text = page.GetText().Trim();
-                    var originalText = text;
                     text = new string(text.Where(char.IsLetterOrDigit).ToArray());
-                    
-                    LogMessage($"OCR {method}: Raw='{originalText}', Filtered='{text}', Length={text.Length}");
                     
                     // More detailed logging for debugging
                     if (string.IsNullOrEmpty(text))
                     {
-                        LogMessage($"OCR {method}: FAILED - empty result after filtering");
                         return string.Empty;
                     }
                     
                     // Flexible regex filter
                     if (!Regex.IsMatch(text, "^[a-zA-Z0-9]{2,10}$"))
                     {
-                        LogMessage($"OCR {method}: FAILED - regex mismatch (text: '{text}', length: {text.Length})");
                         return string.Empty;
                     }
 
@@ -2099,8 +1967,6 @@ namespace langla_duky
                 inputPointClient = cfg.InputFieldPosition;
                 confirmPointClient = cfg.ConfirmButtonPosition;
             }
-
-            LogMessage($"Automation points: Input=({inputPointClient.X},{inputPointClient.Y}) Confirm=({confirmPointClient.X},{confirmPointClient.Y}) mode={mode} (client-coords)");
 
             InputAutomation.ClickInWindow(_selectedGameWindow!.Handle, inputPointClient);
             await Task.Delay(cfg.AutomationSettings.DelayAfterClick, token);
