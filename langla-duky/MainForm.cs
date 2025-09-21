@@ -2105,7 +2105,7 @@ namespace langla_duky
             InputAutomation.ClickInWindow(_selectedGameWindow!.Handle, inputPointClient);
             await Task.Delay(cfg.AutomationSettings.DelayAfterClick, token);
             InputAutomation.SendTextToWindow(_selectedGameWindow!.Handle, captchaText);
-            await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token);
+            await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token); 
             
             // Press Enter after typing the captcha text
             LogMessage($"⌨️ Pressing Enter after typing captcha: '{captchaText}'");

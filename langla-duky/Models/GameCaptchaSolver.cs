@@ -2150,6 +2150,8 @@ public class GameCaptchaSolver : IDisposable
             {'T', 't'},    // T looks like t
             {'9', 'q'},    // 9 looks like q
             {'Q', 'q'},    // Q looks like q
+            {'l', 'i'},    // K looks like k
+            {'K', 'k'},    // K looks like k
         };
 
         var result = text.ToLower();
