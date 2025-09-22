@@ -136,8 +136,13 @@ namespace langla_duky
             InitializeTesseract();
             InitializeGameCaptchaSolver();
             _suppressManualEvents = true;
-            UpdateUIForWindowState();
+            _ = InitializeAsync();
             _suppressManualEvents = false;
+        }
+        
+        private async Task InitializeAsync()
+        {
+            await UpdateUIForWindowState();
         }
 
         private Bitmap FitTo(BoxSize target, Bitmap src)
@@ -409,7 +414,7 @@ namespace langla_duky
             }
         }
 
-        private void BtnSelectWindow_Click(object? sender, EventArgs e)
+        private async void BtnSelectWindow_Click(object? sender, EventArgs e)
         {
             try
             {
@@ -421,7 +426,7 @@ namespace langla_duky
                         LogMessage($"Selected window: {_selectedGameWindow.WindowTitle} ({_selectedGameWindow.Bounds.Width}x{_selectedGameWindow.Bounds.Height})");
                         StartGameWindowPreview();
                         _suppressManualEvents = true;
-                        UpdateUIForWindowState();
+                        await UpdateUIForWindowState();
                         _suppressManualEvents = false;
                     }
                 }
@@ -529,7 +534,7 @@ namespace langla_duky
                 
                 // Update UI but suppress checkbox events to prevent config override
                 _suppressManualEvents = true;
-                UpdateUIForWindowState();
+                await UpdateUIForWindowState();
                 _suppressManualEvents = false;
             }
             catch (Exception ex)
@@ -568,9 +573,9 @@ namespace langla_duky
 
             try
             {
-                // Update UI on UI thread immediately
-                _btnStart.Enabled = false;
-                _btnStartMonitoring.Enabled = false;
+                // Update UI on UI thread immediately - KEEP ALL BUTTONS ENABLED
+                _btnStart.Enabled = true;  // Keep Start enabled
+                _btnStartMonitoring.Enabled = true;  // Keep Start Monitor enabled
                 _btnStop.Enabled = true;
                 _btnStopMonitoring.Enabled = true;
                 _lblStatus.Text = "Status: Monitoring...";
@@ -657,8 +662,8 @@ namespace langla_duky
                 await this.InvokeAsync(() => {
                     _btnStart.Enabled = true;
                     _btnStartMonitoring.Enabled = true;
-                    _btnStop.Enabled = false;
-                    _btnStopMonitoring.Enabled = false;
+                    _btnStop.Enabled = true;  // Keep Stop enabled
+                    _btnStopMonitoring.Enabled = true;  // Keep Stop Monitor enabled
                     _lblStatus.Text = "Status: Stopped";
                     _lblStatus.ForeColor = SecondaryBlue;
                     _lblMonitoringStatus.Text = "Monitoring: Stopped";
@@ -740,8 +745,18 @@ namespace langla_duky
                                     currentInterval = fastInterval;
                                     consecutiveEmptyCaptures = 0;
                                 }
+                                else if (text == null)
+                                {
+                                    // No captcha content detected - this is not a failure
+                                    await this.InvokeAsync(() => {
+                                        LogMessage("ℹ️ No captcha content detected - continuing monitoring");
+                                        _lblStatus.Text = "Status: Monitoring...";
+                                        _lblStatus.ForeColor = SecondaryBlue;
+                                    });
+                                }
                                 else
                                 {
+                                    // Empty string means OCR failed
                                     _failureCount++;
                                     await this.InvokeAsync(() => {
                                         LogMessage("❌ Failed to solve captcha");
@@ -1069,14 +1084,14 @@ namespace langla_duky
                 if (gameWindow.FindGameWindowWithMultipleInstances())
                 {
                     _selectedGameWindow = gameWindow;
-                    await this.InvokeAsync(() =>
+                    await this.InvokeAsync(async () =>
                     {
                         _lblSelectedWindow.Text = $"Window: {gameWindow.WindowTitle}";
                         _lblSelectedWindow.ForeColor = SuccessGreen;
                         LogMessage($"Auto-detected window: {gameWindow.WindowTitle}");
                         StartGameWindowPreview();
                         _suppressManualEvents = true;
-                        UpdateUIForWindowState();
+                        await UpdateUIForWindowState();
                         _suppressManualEvents = false;
                     });
                 }
@@ -1124,13 +1139,64 @@ namespace langla_duky
             }
         }
 
-        private void UpdateUIForWindowState()
+        private async Task UpdateUIForWindowState()
         {
             bool windowIsValid = _selectedGameWindow != null && _selectedGameWindow.IsValid();
-            _btnStart.Enabled = windowIsValid;
-            _btnStartMonitoring.Enabled = windowIsValid;
+            
+            // If no valid window, try to auto-detect one
+            if (!windowIsValid)
+            {
+                LogMessage("🔍 No valid window selected, attempting auto-detection...");
+                await AutoDetectGameWindow();
+                // Re-check after auto-detection
+                windowIsValid = _selectedGameWindow != null && _selectedGameWindow.IsValid();
+                
+                if (!windowIsValid)
+                {
+                    LogMessage("⚠️ No game window found. Please:");
+                    LogMessage("   1. Make sure the game is running");
+                    LogMessage("   2. Click 'Select Game Window' to manually select");
+                    LogMessage("   3. Or restart the tool after opening the game");
+                }
+            }
+            
+            // Enable buttons based on window validity and monitoring state
+            bool canStart = windowIsValid && !_isMonitoring;
+            _btnStart.Enabled = canStart;
+            _btnStartMonitoring.Enabled = canStart;
             _btnTest.Enabled = windowIsValid;
             _btnCaptureDebug.Enabled = windowIsValid;
+            
+            // Update status label
+            if (windowIsValid)
+            {
+                _lblStatus.Text = _isMonitoring ? "Status: Monitoring..." : "Status: Ready";
+                _lblStatus.ForeColor = _isMonitoring ? SuccessGreen : SuccessGreen;
+            }
+            else
+            {
+                _lblStatus.Text = "Status: No Game Window";
+                _lblStatus.ForeColor = DangerRed;
+            }
+            
+            // Force UI refresh
+            this.Refresh();
+            
+            // Log button states for debugging
+            LogMessage($"🔧 UI State: Start={_btnStart.Enabled}, Test={_btnTest.Enabled}, Window={windowIsValid}, Monitoring={_isMonitoring}");
+            
+            // Force enable buttons if needed (for debugging)
+            if (!_btnStart.Enabled && !_btnTest.Enabled)
+            {
+                LogMessage("🔧 Force enabling buttons for debugging...");
+                _btnStart.Enabled = true;
+                _btnStartMonitoring.Enabled = true;
+                _btnTest.Enabled = true;
+                _btnCaptureDebug.Enabled = true;
+            }
+            
+            // Additional UI refresh
+            Application.DoEvents();
 
             // Enable/disable manual controls based on config
             bool manual = _config?.UseManualCapture ?? false;
@@ -1901,8 +1967,16 @@ namespace langla_duky
             }
             else
             {
-                LogMessage($"❌ GameCaptchaSolver failed: {result.Error}");
-                return string.Empty;
+                if (result.Error == "No captcha content detected")
+                {
+                    LogMessage("ℹ️ No captcha content detected - skipping OCR processing");
+                    return null; // Return null to indicate no captcha (not empty string for failure)
+                }
+                else
+                {
+                    LogMessage($"❌ GameCaptchaSolver failed: {result.Error}");
+                    return string.Empty;
+                }
             }
         }
         catch (Exception ex)
@@ -2134,6 +2208,12 @@ namespace langla_duky
         {
             try
             {
+                // DISABLED: No more overlay windows to avoid "mờ mờ" buttons
+                // Just log the rectangle info without showing overlay
+                LogMessage($"🔍 ROI Rectangle: {label} at {rect.X},{rect.Y} {rect.Width}x{rect.Height}");
+                
+                // Optional: You can enable this for debugging by uncommenting below
+                /*
                 // Create a transparent overlay window to draw the rectangle
                 var overlay = new Form
                 {
@@ -2173,6 +2253,7 @@ namespace langla_duky
                     overlay.Dispose();
                 };
                 timer.Start();
+                */
             }
             catch (Exception ex)
             {

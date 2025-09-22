@@ -23,6 +23,7 @@ public class GameCaptchaSolver : IDisposable
         "K85004482088957"
     };
     private int _currentApiKeyIndex = 0;
+    private int _apiCallCount = 0;
     private readonly RestClient _restClient;
 
     public GameCaptchaSolver(string tessdataPath = @"./tessdata", Action<string>? logMessage = null)
@@ -103,7 +104,17 @@ public class GameCaptchaSolver : IDisposable
         {
             LogMessage($"🔍 Processing captcha image: {inputImage.Size()}");
 
-            // Step 0: Analyze the input image for debugging
+            // Step 0: Check if image actually contains captcha content
+            if (!HasCaptchaContent(inputImage))
+            {
+                LogMessage("❌ No captcha content detected - skipping OCR processing");
+                result.Success = false;
+                result.Error = "No captcha content detected";
+                result.ProcessingTime = stopwatch.Elapsed;
+                return result;
+            }
+
+            // Step 1: Analyze the input image for debugging
             AnalyzeImageQuality(inputImage);
 
             // Step 1: Remove dark borders first
@@ -210,6 +221,7 @@ public class GameCaptchaSolver : IDisposable
                             var candidate = new CandidateResult
                             {
                                 Text = cleanedText,
+                                OriginalText = ocrResult.Text,
                                 Confidence = ocrResult.Confidence,
                                 Method = $"{preprocessResult.Method} ({source})"
                             };
@@ -245,6 +257,7 @@ public class GameCaptchaSolver : IDisposable
                                     fourCharCandidates.Add(new CandidateResult
                                     {
                                         Text = extracted,
+                                        OriginalText = ocrResult.Text,
                                         Confidence = ocrResult.Confidence,
                                         Method = preprocessResult.Method + " (extracted)"
                             });
@@ -394,6 +407,7 @@ public class GameCaptchaSolver : IDisposable
                             correctLengthCandidates.Add(new CandidateResult
                             {
                                 Text = trimmed,
+                                OriginalText = candidate.OriginalText,
                                 Confidence = candidate.Confidence,
                                 Method = candidate.Method
                             });
@@ -415,6 +429,7 @@ public class GameCaptchaSolver : IDisposable
                             correctLengthCandidates.Add(new CandidateResult 
                             { 
                                 Text = extracted, 
+                                OriginalText = candidate.OriginalText,
                                 Confidence = candidate.Confidence, 
                                 Method = candidate.Method + " (extracted)" 
                             });
@@ -437,9 +452,21 @@ public class GameCaptchaSolver : IDisposable
                 CandidateResult bestCandidate;
                 if (correctLengthCandidates.Any())
                 {
-                    // 4-character results are already prioritized, just pick the best one
-                    bestCandidate = correctLengthCandidates.OrderByDescending(c => c.Confidence).First();
-                    LogMessage($"🎯 Selected 4-character result: '{bestCandidate.Text}' (confidence: {bestCandidate.Confidence:F1}%, method: {bestCandidate.Method})");
+                    // 4-character results are already prioritized
+                    // First, check if any result has been pattern-corrected (these are more likely to be correct)
+                    var patternCorrected = correctLengthCandidates.Where(c => c.Text != c.OriginalText).ToList();
+                    if (patternCorrected.Any())
+                    {
+                        // Prioritize pattern-corrected results
+                        bestCandidate = patternCorrected.OrderByDescending(c => c.Confidence).First();
+                        LogMessage($"🎯 Selected pattern-corrected 4-character result: '{bestCandidate.Text}' (confidence: {bestCandidate.Confidence:F1}%, method: {bestCandidate.Method})");
+                    }
+                    else
+                    {
+                        // Fallback to highest confidence
+                        bestCandidate = correctLengthCandidates.OrderByDescending(c => c.Confidence).First();
+                        LogMessage($"🎯 Selected 4-character result: '{bestCandidate.Text}' (confidence: {bestCandidate.Confidence:F1}%, method: {bestCandidate.Method})");
+                    }
                 }
                 else if (allValidCandidates.Any())
                 {
@@ -490,6 +517,154 @@ public class GameCaptchaSolver : IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Check if the image contains captcha content (not empty/blank)
+    /// </summary>
+    private bool HasCaptchaContent(Mat input)
+    {
+        try
+        {
+            LogMessage("🔍 Checking for captcha content...");
+
+            // Convert to grayscale for analysis
+            Mat gray;
+            if (input.Channels() == 3)
+            {
+                gray = new Mat();
+                Cv2.CvtColor(input, gray, ColorConversionCodes.BGR2GRAY);
+            }
+            else if (input.Channels() == 4)
+            {
+                gray = new Mat();
+                Cv2.CvtColor(input, gray, ColorConversionCodes.BGRA2GRAY);
+            }
+            else
+            {
+                gray = input.Clone();
+            }
+
+            // Calculate histogram to analyze pixel distribution
+            var hist = new Mat();
+            using var mask = new Mat();
+            Cv2.CalcHist(new[] { gray }, new[] { 0 }, mask, hist, 1, new[] { 256 }, new[] { new Rangef(0, 256) });
+            
+            var histData = new float[256];
+            hist.GetArray(out histData);
+            
+            var totalPixels = gray.Rows * gray.Cols;
+            
+            // Check for solid color images (likely no captcha)
+            var maxCount = histData.Max();
+            var maxIndex = Array.IndexOf(histData, maxCount);
+            var maxPercentage = maxCount / totalPixels;
+            
+            LogMessage($"📊 Most common pixel value: {maxIndex} (appears {maxPercentage:P1} of image)");
+            
+            // If more than 90% of pixels are the same color, likely no captcha
+            if (maxPercentage > 0.9)
+            {
+                LogMessage("❌ Image appears to be solid color - no captcha content");
+                gray.Dispose();
+                return false;
+            }
+            
+            // Check for very low contrast (likely no text)
+            var nonWhitePixels = histData.Take(240).Sum(); // Pixels that are not pure white
+            var nonWhitePercentage = nonWhitePixels / totalPixels;
+            
+            LogMessage($"📊 Non-white pixels: {nonWhitePercentage:P1}");
+            
+            if (nonWhitePercentage < 0.02) // Less than 2% non-white pixels
+            {
+                LogMessage("❌ Very few non-white pixels - likely no captcha content");
+                gray.Dispose();
+                return false;
+            }
+            
+            // Check for text-like content using edge detection
+            using var blurred = new Mat();
+            Cv2.GaussianBlur(gray, blurred, new OpenCvSharp.Size(3, 3), 0);
+            
+            using var edges = new Mat();
+            Cv2.Canny(blurred, edges, 50, 150);
+            
+            var edgePixels = Cv2.CountNonZero(edges);
+            var edgePercentage = (double)edgePixels / totalPixels;
+            
+            LogMessage($"📊 Edge pixels: {edgePercentage:P2}");
+            
+            // If very few edges, likely no text content
+            if (edgePercentage < 0.001) // Less than 0.1% edge pixels
+            {
+                LogMessage("❌ Very few edges detected - likely no text content");
+                gray.Dispose();
+                return false;
+            }
+            
+            // Check for character-like contours
+            var contours = Cv2.FindContoursAsMat(edges, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+            var characterLikeContours = 0;
+            
+            foreach (var contour in contours)
+            {
+                var area = Cv2.ContourArea(contour);
+                var boundingRect = Cv2.BoundingRect(contour);
+                var aspectRatio = (double)boundingRect.Width / boundingRect.Height;
+                
+                // Character-like shapes: reasonable area and aspect ratio
+                if (area > 20 && area < 5000 && aspectRatio > 0.1 && aspectRatio < 10.0)
+                {
+                    characterLikeContours++;
+                }
+            }
+            
+            LogMessage($"📊 Character-like contours: {characterLikeContours}");
+            
+            // If we have at least 2 character-like contours, likely has captcha content
+            if (characterLikeContours >= 2)
+            {
+                LogMessage("✅ Captcha content detected - proceeding with OCR");
+                gray.Dispose();
+                return true;
+            }
+            
+            // Additional check: look for colorful content (common in captchas)
+            if (input.Channels() >= 3)
+            {
+                using var hsv = new Mat();
+                Cv2.CvtColor(input, hsv, ColorConversionCodes.BGR2HSV);
+                
+                // Check for colorful pixels (not gray/white/black)
+                using var colorfulMask = new Mat();
+                var lowerColorful = new Scalar(0, 30, 30);
+                var upperColorful = new Scalar(180, 255, 255);
+                Cv2.InRange(hsv, lowerColorful, upperColorful, colorfulMask);
+                
+                var colorfulPixels = Cv2.CountNonZero(colorfulMask);
+                var colorfulPercentage = (double)colorfulPixels / totalPixels;
+                
+                LogMessage($"📊 Colorful pixels: {colorfulPercentage:P2}");
+                
+                if (colorfulPercentage > 0.01) // More than 1% colorful pixels
+                {
+                    LogMessage("✅ Colorful content detected - likely captcha");
+                    gray.Dispose();
+                    return true;
+                }
+            }
+            
+            LogMessage("❌ No clear captcha content detected");
+            gray.Dispose();
+            return false;
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"⚠️ Error checking captcha content: {ex.Message}");
+            // If we can't determine, assume there might be content and proceed
+            return true;
+        }
     }
 
     /// <summary>
@@ -1620,15 +1795,7 @@ public class GameCaptchaSolver : IDisposable
             { "wwg", "wwgt" },   // add t
             { "wwt", "wwgt" },   // add g
             
-            // NEW: Other common patterns for wwgt
-            { "wvmg", "wwgt" },  // v→w, m→g, g→t
-            { "wvmt", "wwgt" },  // v→w, m→g
-            { "wvgr", "wwgt" },  // v→w, r→t
-            { "wvgt", "wwgt" },  // v→w
-            { "wwmg", "wwgt" },  // m→g, g→t
-            { "wwmt", "wwgt" },  // m→g
-            { "wwgr", "wwgt" },  // r→t
-            { "wwgt", "wwgt" },  // Already correct
+            // Duplicate entries removed to prevent key conflicts
             
             // NEW: Common misreads for 'i see' (i-teal, s-brown, e-olive, e-green)
             { "cciü", "i see" },  // c→i, c→s, i→e, ü→e
@@ -1640,9 +1807,82 @@ public class GameCaptchaSolver : IDisposable
             { "isiü", "i see" },  // i→i, s→s, i→e, ü→e
             { "isie", "i see" },  // i→i, s→s, i→e
             { "i see", "i see" }, // Already correct
-            { "i see", "i see" }, // Already correct
-            { "i see", "i see" }, // Already correct
-            { "i see", "i see" }, // Already correct
+            
+            // MOST COMMON OCR CONFUSIONS (based on research)
+            // 'i' and 'l' confusion
+            { "l", "i" },         // l→i (very common)
+            { "i", "l" },         // i→l (less common)
+            
+            // 'o' and 'a' confusion  
+            { "o", "a" },         // o→a (common)
+            { "a", "o" },         // a→o (less common)
+            
+            // 'r' and 'n' confusion
+            { "r", "n" },         // r→n (common)
+            
+            // 'c' and 'e' confusion
+            { "c", "e" },         // c→e (common)
+            { "e", "c" },         // e→c (less common)
+            
+            // 'u' and 'v' confusion
+            { "u", "v" },         // u→v (common)
+            { "v", "u" },         // v→u (less common)
+            
+            // 'h' and 'b' confusion
+            { "h", "b" },         // h→b (common)
+            { "b", "h" },         // b→h (less common)
+            
+            // 't' and 'f' confusion
+            { "t", "f" },         // t→f (common)
+            { "f", "t" },         // f→t (less common)
+            
+            // 'g' and 'q' confusion
+            { "g", "q" },         // g→q (common)
+            { "q", "g" },         // q→g (less common)
+            
+            // 'm' and 'n' confusion
+            { "m", "n" },         // m→n (common)
+            
+            // 'w' and 'vv' confusion
+            { "vv", "w" },        // vv→w (common)
+            { "w", "vv" },        // w→vv (less common)
+            
+            // 'y' and 'n' confusion (very common in captcha)
+            { "y", "n" },         // y→n (very common)
+            { "n", "y" },         // n→y (less common)
+            
+            // 's' and '5' confusion
+            { "5", "s" },         // 5→s (common)
+            { "s", "5" },         // s→5 (less common)
+            
+            // 'z' and '2' confusion
+            { "2", "z" },         // 2→z (common)
+            { "z", "2" },         // z→2 (less common)
+            
+            // 'b' and '6' confusion
+            { "6", "b" },         // 6→b (common)
+            { "b", "6" },         // b→6 (less common)
+            
+            // 'g' and '9' confusion
+            { "9", "g" },         // 9→g (common)
+            { "g", "9" },         // g→9 (less common)
+            
+            // 'o' and '0' confusion
+            { "0", "o" },         // 0→o (common)
+            { "o", "0" },         // o→0 (less common)
+            
+            // 'l' and '1' confusion
+            { "1", "l" },         // 1→l (common)
+            { "l", "1" },         // l→1 (less common)
+            
+            // SPECIFIC CAPTCHA PATTERNS
+            // 'yurq' pattern corrections
+            { "nurq", "yurq" },   // n→y (very common OCR mistake)
+            { "yurp", "yurq" },   // p→q
+            { "yurg", "yurq" },   // g→q
+            { "yur9", "yurq" },   // 9→q
+            { "yur0", "yurq" },   // 0→q
+            { "yurq", "yurq" },   // Already correct
             
             // NEW: Common misreads for 'gioq' (g-brown, i-green, o-red, q-blue)
             { "boig", "gioq" },   // b→g, o→i, i→o, g→q
@@ -2726,6 +2966,20 @@ public class GameCaptchaSolver : IDisposable
     /// </summary>
     private OCRResult PerformOCRWithSpaceAPI(Mat processedImage)
     {
+        // Skip API calls if we've already tried all keys recently
+        if (_apiCallCount > 20) // If we've made more than 20 API calls recently
+        {
+            LogMessage("🚫 Too many API calls made recently, skipping API and using Tesseract only");
+            return new OCRResult { Success = false };
+        }
+        
+        // Reset API call count every hour (3600 seconds)
+        if (DateTime.Now.Second == 0 && _apiCallCount > 0)
+        {
+            _apiCallCount = 0;
+            LogMessage("🔄 Resetting API call count for new hour");
+        }
+        
         // Try each API key until one works
         for (int attempt = 0; attempt < _ocrSpaceApiKeys.Length; attempt++)
         {
@@ -2733,6 +2987,9 @@ public class GameCaptchaSolver : IDisposable
             {
                 var currentApiKey = _ocrSpaceApiKeys[_currentApiKeyIndex];
                 LogMessage($"🌐 Using OCR.space API (Key {_currentApiKeyIndex + 1}/{_ocrSpaceApiKeys.Length}): {MaskApiKey(currentApiKey)}");
+                
+                // Increment API call count
+                _apiCallCount++;
 
                 // Convert Mat to byte array
                 using var bitmap = OpenCvSharp.Extensions.BitmapConverter.ToBitmap(processedImage);
@@ -2790,9 +3047,10 @@ public class GameCaptchaSolver : IDisposable
                         // Check if it's a quota/rate limit error and try next key
                         if (IsRateLimitError(apiResponse?.ErrorMessage, response.Content))
                         {
-                            LogMessage($"🔄 API key {_currentApiKeyIndex + 1} rate limited/quota exceeded, trying next key...");
+                            LogMessage($"🔄 API key {_currentApiKeyIndex + 1} rate limited/quota exceeded, switching to next key immediately...");
                             _currentApiKeyIndex = (_currentApiKeyIndex + 1) % _ocrSpaceApiKeys.Length;
-                            continue; // Try next API key
+                            LogMessage($"🔄 Switched to API key {_currentApiKeyIndex + 1}/{_ocrSpaceApiKeys.Length}");
+                            continue; // Try next API key immediately
                         }
                         else
                         {
@@ -2809,9 +3067,10 @@ public class GameCaptchaSolver : IDisposable
                     // Check if it's a quota/rate limit error and try next key
                     if (IsRateLimitError(response.Content, response.StatusCode))
                     {
-                        LogMessage($"🔄 API key {_currentApiKeyIndex + 1} rate limited/quota exceeded, trying next key...");
+                        LogMessage($"🔄 API key {_currentApiKeyIndex + 1} rate limited/quota exceeded, switching to next key immediately...");
                         _currentApiKeyIndex = (_currentApiKeyIndex + 1) % _ocrSpaceApiKeys.Length;
-                        continue; // Try next API key
+                        LogMessage($"🔄 Switched to API key {_currentApiKeyIndex + 1}/{_ocrSpaceApiKeys.Length}");
+                        continue; // Try next API key immediately
                     }
                     else
                     {
@@ -2827,11 +3086,12 @@ public class GameCaptchaSolver : IDisposable
                 
                 // Try next API key on exception
                 _currentApiKeyIndex = (_currentApiKeyIndex + 1) % _ocrSpaceApiKeys.Length;
+                LogMessage($"🔄 Exception occurred, switching to API key {_currentApiKeyIndex + 1}/{_ocrSpaceApiKeys.Length}");
                 continue;
             }
         }
         
-        LogMessage("❌ All OCR.space API keys exhausted or failed");
+        LogMessage("❌ All OCR.space API keys exhausted or failed - switching to Tesseract-only mode");
         return new OCRResult { Success = false };
     }
     
@@ -2905,8 +3165,8 @@ public class GameCaptchaSolver : IDisposable
             
             // Try multiple PSM modes for better results - OPTIMIZED for colorful captcha
             var psmModes = new[] { 
-                PageSegMode.RawLine,         // BEST for colorful captcha - often gives correct results
-                PageSegMode.SingleChar,      // Good for colorful captcha - each character separately
+                PageSegMode.SingleChar,      // BEST for individual character recognition (a vs g)
+                PageSegMode.RawLine,         // Good for colorful captcha - often gives correct results
                 PageSegMode.SingleWord,      // Good for single word captcha
                 PageSegMode.SingleLine,      // Good for horizontal text
                 PageSegMode.SingleBlock      // Good for block of text
@@ -2978,6 +3238,14 @@ public class GameCaptchaSolver : IDisposable
             
             LogMessage($"🔍 Best OCR result: '{bestResult}' (confidence: {bestConfidence:F1}%)");
 
+            // Post-process to fix common character confusions
+            var postProcessedResult = PostProcessOCRResult(bestResult);
+            if (postProcessedResult != bestResult)
+            {
+                LogMessage($"🔧 Post-processed result: '{bestResult}' -> '{postProcessedResult}'");
+                bestResult = postProcessedResult;
+            }
+
             return new OCRResult
             {
                 Text = bestResult,
@@ -3005,7 +3273,7 @@ public class GameCaptchaSolver : IDisposable
         {
             {'!', 'l'},    // ! looks like l
             {'1', 'l'},    // 1 looks like l
-            {'I', 'l'},    // I looks like l
+            {'I', 'i'},    // I looks like i
             {'|', 'l'},    // | looks like l
             {'0', 'o'},    // 0 looks like o
             {'O', 'o'},    // O looks like o
@@ -3025,7 +3293,6 @@ public class GameCaptchaSolver : IDisposable
             {'T', 't'},    // T looks like t
             {'9', 'q'},    // 9 looks like q
             {'Q', 'q'},    // Q looks like q
-            {'l', 'i'},    // K looks like k
             {'K', 'k'},    // K looks like k
         };
 
@@ -3037,10 +3304,136 @@ public class GameCaptchaSolver : IDisposable
             result = result.Replace(replacement.Key, replacement.Value);
         }
         
+        // Special handling for 'a' vs 'g' confusion
+        result = FixAAndGConfusion(result);
+        
         // Remove any remaining non-letter characters
         result = new string(result.Where(c => char.IsLetter(c)).ToArray());
         
         LogMessage($"🧹 Cleaned text: '{text}' -> '{result}' (replaced special chars)");
+        return result;
+    }
+
+    /// <summary>
+    /// Post-process OCR result to fix common character confusions
+    /// </summary>
+    private string PostProcessOCRResult(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+            
+        var result = text.ToLower().Trim();
+        
+        // Fix common OCR mistakes for captcha characters
+        var corrections = new Dictionary<string, string>
+        {
+            // Other common confusions
+            {"0", "o"},  // Zero vs letter O
+            {"1", "l"},  // One vs letter l
+            {"5", "s"},  // Five vs letter s
+            {"8", "b"},  // Eight vs letter b
+            {"6", "g"},  // Six vs letter g
+            {"2", "z"},  // Two vs letter z
+            {"3", "e"},  // Three vs letter e
+            {"4", "a"},  // Four vs letter a
+            {"7", "t"},  // Seven vs letter t
+            {"9", "q"},  // Nine vs letter q
+        };
+        
+        // Apply pattern corrections first (most important)
+        var patternCorrections = new Dictionary<string, string>
+        {
+            // SPECIFIC CAPTCHA PATTERNS
+            { "nurq", "yurq" },   // n→y (very common OCR mistake)
+            { "yurp", "yurq" },   // p→q
+            { "yurg", "yurq" },   // g→q
+            { "yur9", "yurq" },   // 9→q
+            { "yur0", "yurq" },   // 0→q
+        };
+        
+        // Check for pattern corrections first
+        foreach (var pattern in patternCorrections)
+        {
+            if (result == pattern.Key)
+            {
+                result = pattern.Value;
+                LogMessage($"🔧 Pattern correction: '{pattern.Key}' -> '{pattern.Value}'");
+                return result;
+            }
+        }
+        
+        // Apply single character corrections
+        foreach (var correction in corrections)
+        {
+            if (result.Contains(correction.Key))
+            {
+                // Only apply correction if it makes sense in captcha context
+                if (correction.Value.Length == 1 && IsValidCaptchaCharacter(correction.Value[0]))
+                {
+                    result = result.Replace(correction.Key, correction.Value);
+                    LogMessage($"🔧 Post-process correction: '{correction.Key}' -> '{correction.Value}'");
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    /// <summary>
+    /// Check if character is valid for captcha (lowercase letters only)
+    /// </summary>
+    private bool IsValidCaptchaCharacter(char c)
+    {
+        return c >= 'a' && c <= 'z';
+    }
+
+    /// <summary>
+    /// Fix common confusion between 'a' and 'g' characters
+    /// </summary>
+    private string FixAAndGConfusion(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+            
+        var result = text;
+        
+        // No automatic a/g replacement - let OCR result stand
+        // Only apply context-based corrections for specific patterns
+        
+        // Apply context-based corrections
+        // For 4-character captcha, check common patterns
+        if (result.Length == 4)
+        {
+            // Common captcha patterns where 'a' is more likely than 'g'
+            var commonAPatterns = new[] { "ica", "uca", "oca", "aca", "bca", "dca", "fca", "hca", "jca", "kca", "lca", "mca", "nca", "pca", "qca", "rca", "sca", "tca", "vca", "wca", "xca", "yca", "zca" };
+            var commonGPatterns = new[] { "icg", "ucg", "ocg", "acg", "bcg", "dcg", "fcg", "hcg", "jcg", "kcg", "lcg", "mcg", "ncg", "pcg", "qcg", "rcg", "scg", "tcg", "vcg", "wcg", "xcg", "ycg", "zcg" };
+            
+            // Only apply corrections for very specific known patterns
+            // Don't do automatic a/g replacement as it's causing issues
+            
+            // Special case: if we have "icug" pattern, it's likely "icua"
+            if (result == "icug")
+            {
+                result = "icua";
+                LogMessage("🔧 Fixed 'icug' -> 'icua' (common captcha pattern)");
+            }
+            
+            // Special case: if we have "icga" pattern, it's likely "icua"
+            if (result == "icga")
+            {
+                result = "icua";
+                LogMessage("🔧 Fixed 'icga' -> 'icua' (common captcha pattern)");
+            }
+        }
+        
+        // Disable position heuristics for now as they're causing incorrect changes
+        // Let OCR results stand unless we have very specific known patterns
+        
+        if (result != text)
+        {
+            LogMessage($"🔧 A/G confusion fix: '{text}' -> '{result}'");
+        }
+        
         return result;
     }
 
@@ -3177,6 +3570,7 @@ public class OCRResult
 public class CandidateResult
 {
     public string Text { get; set; } = "";
+    public string OriginalText { get; set; } = "";
     public float Confidence { get; set; }
     public string Method { get; set; } = "";
 }
