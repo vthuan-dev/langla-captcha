@@ -111,16 +111,22 @@ public class GameCaptchaSolver : IDisposable
             // Step 2: Optimize image size for OCR
             using var optimized = OptimizeImageForOCR(cropped);
             
-            // Step 2: Optimized preprocessing approaches - prioritize best performing methods
+            // Step 2: NEW OPTIMIZED FLOW - Color-Aware Processing for Colorful Captchas
             var approaches = new List<Func<Mat, PreprocessResult>>
             {
-                ProcessWithAdaptiveThreshold,  // BEST: Gives "gPir" result from API
-                ProcessWithInversion,          // GOOD: Gives "jr" result from API  
-                ProcessWithColorfulCaptchaV3,  // GOOD: Works well with Tesseract
-                ProcessWithColorfulCaptcha,    // FALLBACK: Works with Tesseract
-                ProcessWithScaling,            // HELPFUL: Scale up for better OCR
-                ProcessWithOtsuThreshold,      // BASIC: Standard threshold
-                ProcessAsBinary                // BASIC: Simple binary conversion
+                // NEW: Color-Aware Flow (PRIORITY 1 - Best for colorful captchas like jsjx)
+                ProcessWithColorAwarePreprocessing,    // NEW: Color-aware preprocessing
+                ProcessWithCharacterSegmentation,      // NEW: Character segmentation in color space
+                ProcessWithSelectiveBinarization,      // NEW: Selective binarization per character
+                
+                // EXISTING: Fallback methods for compatibility
+                ProcessWithAdaptiveThreshold,          // GOOD: Adaptive threshold
+                ProcessWithInversion,                  // GOOD: Inversion method
+                ProcessWithColorfulCaptchaV3,          // GOOD: Works well with Tesseract
+                ProcessWithColorfulCaptcha,            // FALLBACK: Works with Tesseract
+                ProcessWithScaling,                    // HELPFUL: Scale up for better OCR
+                ProcessWithOtsuThreshold,              // BASIC: Standard threshold
+                ProcessAsBinary                        // BASIC: Simple binary conversion
             };
 
             var candidates = new List<CandidateResult>();
@@ -175,6 +181,16 @@ public class GameCaptchaSolver : IDisposable
                             ocrResult = apiResult.Success ? apiResult : tesseractResult;
                             source = apiResult.Success ? "API" : "Tesseract";
                             LogMessage($"🔄 Fallback to {source}: '{ocrResult.Text}' (confidence: {ocrResult.Confidence:F1}%)");
+                        }
+                        
+                        // NEW: Special handling for Color-Aware methods
+                        var isColorAwareMethod = preprocessResult.Method.Contains("Color-Aware") || 
+                                                preprocessResult.Method.Contains("Character Segmentation") || 
+                                                preprocessResult.Method.Contains("Selective Binarization");
+                        
+                        if (isColorAwareMethod && !string.IsNullOrEmpty(ocrResult.Text))
+                        {
+                            LogMessage($"🎨 Color-Aware method result: '{ocrResult.Text}' (method: {preprocessResult.Method})");
                         }
                         
                         // Clean the OCR result: remove special characters, keep only lowercase letters
@@ -301,16 +317,40 @@ public class GameCaptchaSolver : IDisposable
                 {
                     LogMessage($"🎯 Found {correctLengthCandidates.Count} 4-character results - these are already prioritized!");
                     
-                    // Within 4-character results, STRONGLY prioritize API results over Tesseract
-                    var apiResults = correctLengthCandidates.Where(c => c.Method.Contains("(API)")).ToList();
-                    var tesseractResults = correctLengthCandidates.Where(c => c.Method.Contains("(Tesseract)")).ToList();
-                    
-                    if (apiResults.Any())
-                    {
-                        LogMessage($"🌐 Found {apiResults.Count} API results - STRONGLY prioritizing these over Tesseract!");
-                        // API results get absolute priority, regardless of confidence
-                        correctLengthCandidates = apiResults.Concat(tesseractResults).ToList();
-                    }
+                // NEW: Within 4-character results, prioritize by accuracy, not just method type
+                var colorAwareResults = correctLengthCandidates.Where(c => 
+                    c.Method.Contains("Color-Aware") || 
+                    c.Method.Contains("Character Segmentation") || 
+                    c.Method.Contains("Selective Binarization")).ToList();
+                
+                var apiResults = correctLengthCandidates.Where(c => c.Method.Contains("(API)")).ToList();
+                var tesseractResults = correctLengthCandidates.Where(c => c.Method.Contains("(Tesseract)")).ToList();
+                
+                // NEW: Check if Tesseract results look more accurate (common patterns)
+                var tesseractAccurate = tesseractResults.Where(c => 
+                    c.Text.Length == 4 && 
+                    (c.Text.All(char.IsLetter) || c.Text.All(char.IsDigit)) &&
+                    !c.Text.Contains(" ") && !c.Text.Contains(".") && !c.Text.Contains(",")
+                ).ToList();
+                
+                if (tesseractAccurate.Any())
+                {
+                    LogMessage($"🔍 Found {tesseractAccurate.Count} accurate Tesseract results - PRIORITIZING these over API!");
+                    // Tesseract accurate results get absolute priority
+                    correctLengthCandidates = tesseractAccurate.Concat(colorAwareResults).Concat(apiResults).Concat(tesseractResults.Except(tesseractAccurate)).ToList();
+                }
+                else if (colorAwareResults.Any())
+                {
+                    LogMessage($"🎨 Found {colorAwareResults.Count} Color-Aware results - PRIORITIZING these for colorful captchas!");
+                    // Color-Aware results get priority for colorful captchas
+                    correctLengthCandidates = colorAwareResults.Concat(tesseractResults).Concat(apiResults).ToList();
+                }
+                else if (apiResults.Any())
+                {
+                    LogMessage($"🌐 Found {apiResults.Count} API results - using as fallback");
+                    // API results as fallback
+                    correctLengthCandidates = apiResults.Concat(tesseractResults).ToList();
+                }
                 }
                 
                 // Priority 2: Handle 5-character results that start with 'l' (common OCR error)
@@ -827,6 +867,532 @@ public class GameCaptchaSolver : IDisposable
     }
 
     /// <summary>
+    /// NEW: Color-Aware Preprocessing - xử lý màu sắc trước khi chuyển sang grayscale
+    /// </summary>
+    private PreprocessResult ProcessWithColorAwarePreprocessing(Mat input)
+    {
+        if (input.Channels() < 3)
+        {
+            return new PreprocessResult { Success = false };
+        }
+
+        LogMessage("🎨 Processing Color-Aware Preprocessing...");
+
+        // Save original for debugging
+        var originalPath = Path.Combine("captcha_debug", $"color_aware_original_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(originalPath, input);
+        LogMessage($"💾 Saved original: {originalPath}");
+
+        // Convert to HSV for better color detection
+        using var hsv = new Mat();
+        if (input.Channels() == 3)
+        {
+            Cv2.CvtColor(input, hsv, ColorConversionCodes.BGR2HSV);
+        }
+        else if (input.Channels() == 4)
+        {
+            using var bgr = new Mat();
+            Cv2.CvtColor(input, bgr, ColorConversionCodes.BGRA2BGR);
+            Cv2.CvtColor(bgr, hsv, ColorConversionCodes.BGR2HSV);
+        }
+
+        // Save HSV for debugging
+        var hsvPath = Path.Combine("captcha_debug", $"color_aware_hsv_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(hsvPath, hsv);
+        LogMessage($"💾 Saved HSV: {hsvPath}");
+
+        // Detect colorful characters (not white/black/gray) - IMPROVED thresholds
+        using var colorfulMask = new Mat();
+        var lowerColorful = new Scalar(0, 50, 50);    // Higher thresholds for better color detection
+        var upperColorful = new Scalar(180, 255, 255);
+        Cv2.InRange(hsv, lowerColorful, upperColorful, colorfulMask);
+        
+        // Also try detecting specific color ranges for better accuracy
+        using var purpleMask = new Mat();
+        var lowerPurple = new Scalar(120, 50, 50);    // Purple range
+        var upperPurple = new Scalar(160, 255, 255);
+        Cv2.InRange(hsv, lowerPurple, upperPurple, purpleMask);
+        
+        using var yellowMask = new Mat();
+        var lowerYellow = new Scalar(20, 50, 50);     // Yellow range
+        var upperYellow = new Scalar(40, 255, 255);
+        Cv2.InRange(hsv, lowerYellow, upperYellow, yellowMask);
+        
+        using var pinkMask = new Mat();
+        var lowerPink = new Scalar(160, 50, 50);      // Pink/Magenta range
+        var upperPink = new Scalar(180, 255, 255);
+        Cv2.InRange(hsv, lowerPink, upperPink, pinkMask);
+        
+        // Combine all color masks
+        using var combinedMask = new Mat();
+        Cv2.BitwiseOr(colorfulMask, purpleMask, combinedMask);
+        Cv2.BitwiseOr(combinedMask, yellowMask, combinedMask);
+        Cv2.BitwiseOr(combinedMask, pinkMask, combinedMask);
+
+        // Save all masks for debugging
+        var colorfulMaskPath = Path.Combine("captcha_debug", $"color_aware_colorful_mask_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(colorfulMaskPath, colorfulMask);
+        LogMessage($"💾 Saved colorful mask: {colorfulMaskPath}");
+        
+        var purpleMaskPath = Path.Combine("captcha_debug", $"color_aware_purple_mask_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(purpleMaskPath, purpleMask);
+        LogMessage($"💾 Saved purple mask: {purpleMaskPath}");
+        
+        var yellowMaskPath = Path.Combine("captcha_debug", $"color_aware_yellow_mask_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(yellowMaskPath, yellowMask);
+        LogMessage($"💾 Saved yellow mask: {yellowMaskPath}");
+        
+        var pinkMaskPath = Path.Combine("captcha_debug", $"color_aware_pink_mask_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(pinkMaskPath, pinkMask);
+        LogMessage($"💾 Saved pink mask: {pinkMaskPath}");
+        
+        var combinedMaskPath = Path.Combine("captcha_debug", $"color_aware_combined_mask_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(combinedMaskPath, combinedMask);
+        LogMessage($"💾 Saved combined mask: {combinedMaskPath}");
+
+        // Apply combined mask to isolate colorful characters
+        using var colorfulChars = new Mat();
+        Cv2.BitwiseAnd(input, input, colorfulChars, combinedMask);
+
+        // Save isolated colorful characters
+        var isolatedPath = Path.Combine("captcha_debug", $"color_aware_isolated_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(isolatedPath, colorfulChars);
+        LogMessage($"💾 Saved isolated: {isolatedPath}");
+
+        // Convert to grayscale for further processing
+        using var gray = new Mat();
+        Cv2.CvtColor(colorfulChars, gray, ColorConversionCodes.BGR2GRAY);
+
+        // STEP 1: Noise removal BEFORE scaling (important OpenCV flow!)
+        using var denoised = new Mat();
+        Cv2.GaussianBlur(gray, denoised, new OpenCvSharp.Size(3, 3), 0);
+        
+        // STEP 2: Contrast enhancement
+        using var enhanced = new Mat();
+        Cv2.EqualizeHist(denoised, enhanced);
+
+        // Save grayscale for debugging
+        var grayPath = Path.Combine("captcha_debug", $"color_aware_gray_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(grayPath, gray);
+        LogMessage($"💾 Saved grayscale: {grayPath}");
+        
+        var denoisedPath = Path.Combine("captcha_debug", $"color_aware_denoised_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(denoisedPath, denoised);
+        LogMessage($"💾 Saved denoised: {denoisedPath}");
+        
+        var enhancedPath = Path.Combine("captcha_debug", $"color_aware_enhanced_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(enhancedPath, enhanced);
+        LogMessage($"💾 Saved enhanced: {enhancedPath}");
+
+        // Scale up for better OCR (16x for maximum quality for colorful captcha)
+        using var scaled = new Mat();
+        var newSize = new OpenCvSharp.Size(enhanced.Width * 16, enhanced.Height * 16);
+        Cv2.Resize(enhanced, scaled, newSize, interpolation: InterpolationFlags.Lanczos4);
+
+        // Save scaled for debugging
+        var scaledPath = Path.Combine("captcha_debug", $"color_aware_scaled_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(scaledPath, scaled);
+        LogMessage($"💾 Saved scaled: {scaledPath}");
+
+        // Apply multiple thresholding methods and choose the best one
+        using var adaptive = new Mat();
+        Cv2.AdaptiveThreshold(scaled, adaptive, 255, AdaptiveThresholdTypes.GaussianC, 
+                            ThresholdTypes.Binary, 7, 3);
+        
+        // Try Otsu thresholding as alternative
+        using var otsu = new Mat();
+        Cv2.Threshold(scaled, otsu, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+        
+        // Try fixed threshold
+        using var fixedThreshold = new Mat();
+        Cv2.Threshold(scaled, fixedThreshold, 127, 255, ThresholdTypes.Binary);
+        
+        // Choose the best thresholding result based on character density
+        var adaptiveNonZero = Cv2.CountNonZero(adaptive);
+        var otsuNonZero = Cv2.CountNonZero(otsu);
+        var fixedNonZero = Cv2.CountNonZero(fixedThreshold);
+        
+        Mat bestThreshold;
+        string thresholdMethod;
+        if (Math.Abs(adaptiveNonZero - scaled.Rows * scaled.Cols * 0.3) < 
+            Math.Abs(otsuNonZero - scaled.Rows * scaled.Cols * 0.3))
+        {
+            bestThreshold = adaptive;
+            thresholdMethod = "Adaptive";
+        }
+        else
+        {
+            bestThreshold = otsu;
+            thresholdMethod = "Otsu";
+        }
+        
+        if (Math.Abs(fixedNonZero - scaled.Rows * scaled.Cols * 0.3) < 
+            Math.Abs(Cv2.CountNonZero(bestThreshold) - scaled.Rows * scaled.Cols * 0.3))
+        {
+            bestThreshold = fixedThreshold;
+            thresholdMethod = "Fixed";
+        }
+        
+        LogMessage($"🎯 Best thresholding method: {thresholdMethod}");
+
+        // Save all thresholding results for debugging
+        var adaptivePath = Path.Combine("captcha_debug", $"color_aware_adaptive_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(adaptivePath, adaptive);
+        LogMessage($"💾 Saved adaptive: {adaptivePath}");
+        
+        var otsuPath = Path.Combine("captcha_debug", $"color_aware_otsu_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(otsuPath, otsu);
+        LogMessage($"💾 Saved otsu: {otsuPath}");
+        
+        var fixedPath = Path.Combine("captcha_debug", $"color_aware_fixed_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(fixedPath, fixedThreshold);
+        LogMessage($"💾 Saved fixed: {fixedPath}");
+
+        // Apply enhanced morphological operations for low-quality images
+        using var kernel = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
+        using var cleaned = new Mat();
+        
+        // First, try to remove noise with opening operation
+        using var opened = new Mat();
+        Cv2.MorphologyEx(bestThreshold, opened, MorphTypes.Open, kernel);
+        
+        // Then close gaps with closing operation
+        Cv2.MorphologyEx(opened, cleaned, MorphTypes.Close, kernel);
+        
+        // Additional noise removal for very noisy images
+        using var finalDenoised = new Mat();
+        Cv2.MedianBlur(cleaned, finalDenoised, 3);
+        
+        // NEW: Special processing to distinguish i and l better
+        using var enhancedForIL = new Mat();
+        using var kernelVertical = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(1, 3));
+        Cv2.MorphologyEx(finalDenoised, enhancedForIL, MorphTypes.Close, kernelVertical);
+        
+        // NEW: Special processing to distinguish h and o better
+        using var enhancedForHO = new Mat();
+        using var kernelHorizontal = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(3, 1));
+        Cv2.MorphologyEx(enhancedForIL, enhancedForHO, MorphTypes.Close, kernelHorizontal);
+        
+        // Save enhanced for i/l distinction
+        var enhancedILPath = Path.Combine("captcha_debug", $"color_aware_enhanced_il_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(enhancedILPath, enhancedForIL);
+        LogMessage($"💾 Saved enhanced for i/l distinction: {enhancedILPath}");
+        
+        // Save enhanced for h/o distinction
+        var enhancedHOPath = Path.Combine("captcha_debug", $"color_aware_enhanced_ho_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(enhancedHOPath, enhancedForHO);
+        LogMessage($"💾 Saved enhanced for h/o distinction: {enhancedHOPath}");
+
+        // Save final result for debugging
+        var finalPath = Path.Combine("captcha_debug", $"color_aware_final_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(finalPath, enhancedForHO);
+        LogMessage($"💾 Saved final: {finalPath}");
+
+        var result = new PreprocessResult { ProcessedImage = enhancedForHO.Clone(), Success = true, Method = "Color-Aware Preprocessing" };
+        return result;
+    }
+
+    /// <summary>
+    /// NEW: Character Segmentation trong không gian màu
+    /// </summary>
+    private PreprocessResult ProcessWithCharacterSegmentation(Mat input)
+    {
+        if (input.Channels() < 3)
+        {
+            return new PreprocessResult { Success = false };
+        }
+
+        LogMessage("🔍 Processing Character Segmentation...");
+
+        // Save original for debugging
+        var originalPath = Path.Combine("captcha_debug", $"char_seg_original_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(originalPath, input);
+        LogMessage($"💾 Saved original: {originalPath}");
+
+        // Convert to HSV for better color detection
+        using var hsv = new Mat();
+        if (input.Channels() == 3)
+        {
+            Cv2.CvtColor(input, hsv, ColorConversionCodes.BGR2HSV);
+        }
+        else if (input.Channels() == 4)
+        {
+            using var bgr = new Mat();
+            Cv2.CvtColor(input, bgr, ColorConversionCodes.BGRA2BGR);
+            Cv2.CvtColor(bgr, hsv, ColorConversionCodes.BGR2HSV);
+        }
+
+        // Create mask for colorful characters
+        using var colorfulMask = new Mat();
+        var lowerColorful = new Scalar(0, 30, 30);
+        var upperColorful = new Scalar(180, 255, 255);
+        Cv2.InRange(hsv, lowerColorful, upperColorful, colorfulMask);
+
+        // Find contours to separate characters
+        var contours = Cv2.FindContoursAsMat(colorfulMask, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+        LogMessage($"🔍 Found {contours.Length} contours for character segmentation");
+
+        if (contours.Length >= 1)
+        {
+            // Scale up first for better character separation
+            using var scaled = new Mat();
+            var newSize = new OpenCvSharp.Size(input.Width * 8, input.Height * 8);
+            Cv2.Resize(input, scaled, newSize, interpolation: InterpolationFlags.Lanczos4);
+
+            // Save scaled for debugging
+            var scaledPath = Path.Combine("captcha_debug", $"char_seg_scaled_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+            Cv2.ImWrite(scaledPath, scaled);
+            LogMessage($"💾 Saved scaled: {scaledPath}");
+
+            // Convert scaled to grayscale
+            using var gray = new Mat();
+            Cv2.CvtColor(scaled, gray, ColorConversionCodes.BGR2GRAY);
+
+            // Apply adaptive threshold
+            using var adaptive = new Mat();
+            Cv2.AdaptiveThreshold(gray, adaptive, 255, AdaptiveThresholdTypes.GaussianC, 
+                                ThresholdTypes.Binary, 11, 2);
+
+            // Save adaptive for debugging
+            var adaptivePath = Path.Combine("captcha_debug", $"char_seg_adaptive_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+            Cv2.ImWrite(adaptivePath, adaptive);
+            LogMessage($"💾 Saved adaptive: {adaptivePath}");
+
+            // Find contours on scaled image
+            var scaledContours = Cv2.FindContoursAsMat(adaptive, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+            LogMessage($"🔍 Found {scaledContours.Length} scaled contours");
+
+            // Filter contours by area and aspect ratio to get character-like shapes
+            var characterContours = new List<Mat>();
+            foreach (var contour in scaledContours)
+            {
+                var area = Cv2.ContourArea(contour);
+                var boundingRect = Cv2.BoundingRect(contour);
+                var aspectRatio = (double)boundingRect.Width / boundingRect.Height;
+                
+                // Filter for character-like shapes
+                if (area > 100 && area < 50000 && aspectRatio > 0.2 && aspectRatio < 3.0)
+                {
+                    characterContours.Add(contour);
+                    LogMessage($"🔍 Added character contour: area={area:F0}, aspect={aspectRatio:F2}, rect={boundingRect}");
+                }
+            }
+
+            LogMessage($"🔍 Found {characterContours.Count} character-like contours");
+
+            // Sort contours by X position (left to right)
+            characterContours = characterContours.OrderBy(c => Cv2.BoundingRect(c).X).ToList();
+
+            // Create clean image with separated characters
+            using var separated = Mat.Zeros(adaptive.Size(), MatType.CV_8UC1);
+            
+            // Draw each character contour
+            foreach (var contour in characterContours)
+            {
+                // Convert Mat<Point> to Point[] for FillPoly
+                var points = new List<OpenCvSharp.Point>();
+                for (int i = 0; i < contour.Rows; i++)
+                {
+                    var point = contour.At<OpenCvSharp.Point>(i, 0);
+                    points.Add(point);
+                }
+                Cv2.FillPoly(separated, new[] { points.ToArray() }, Scalar.White);
+            }
+
+            // Save separated for debugging
+            var separatedPath = Path.Combine("captcha_debug", $"char_seg_separated_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+            Cv2.ImWrite(separatedPath, separated);
+            LogMessage($"💾 Saved separated: {separatedPath}");
+
+            // Apply gentle morphology to clean up
+            using var kernel = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(2, 2));
+            using var cleaned = new Mat();
+            Cv2.MorphologyEx(separated, cleaned, MorphTypes.Close, kernel);
+
+            // Save final for debugging
+            var finalPath = Path.Combine("captcha_debug", $"char_seg_final_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+            Cv2.ImWrite(finalPath, cleaned);
+            LogMessage($"💾 Saved final: {finalPath}");
+
+            var result = new PreprocessResult { ProcessedImage = cleaned.Clone(), Success = true, Method = "Character Segmentation" };
+            return result;
+        }
+        else
+        {
+            LogMessage("⚠️ Not enough contours found for character segmentation");
+            // Fallback to simple processing
+            using var gray = new Mat();
+            Cv2.CvtColor(input, gray, ColorConversionCodes.BGR2GRAY);
+            using var scaled = new Mat();
+            var newSize = new OpenCvSharp.Size(gray.Width * 8, gray.Height * 8);
+            Cv2.Resize(gray, scaled, newSize, interpolation: InterpolationFlags.Lanczos4);
+            using var binary = new Mat();
+            Cv2.Threshold(scaled, binary, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+            
+            var result = new PreprocessResult { ProcessedImage = binary.Clone(), Success = true, Method = "Character Segmentation (Fallback)" };
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// NEW: Selective Binarization cho từng ký tự riêng biệt
+    /// </summary>
+    private PreprocessResult ProcessWithSelectiveBinarization(Mat input)
+    {
+        if (input.Channels() < 3)
+        {
+            return new PreprocessResult { Success = false };
+        }
+
+        LogMessage("⚫ Processing Selective Binarization...");
+
+        // Save original for debugging
+        var originalPath = Path.Combine("captcha_debug", $"selective_bin_original_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        Cv2.ImWrite(originalPath, input);
+        LogMessage($"💾 Saved original: {originalPath}");
+
+        // Convert to HSV for better color detection
+        using var hsv = new Mat();
+        if (input.Channels() == 3)
+        {
+            Cv2.CvtColor(input, hsv, ColorConversionCodes.BGR2HSV);
+        }
+        else if (input.Channels() == 4)
+        {
+            using var bgr = new Mat();
+            Cv2.CvtColor(input, bgr, ColorConversionCodes.BGRA2BGR);
+            Cv2.CvtColor(bgr, hsv, ColorConversionCodes.BGR2HSV);
+        }
+
+        // Create mask for colorful characters
+        using var colorfulMask = new Mat();
+        var lowerColorful = new Scalar(0, 30, 30);
+        var upperColorful = new Scalar(180, 255, 255);
+        Cv2.InRange(hsv, lowerColorful, upperColorful, colorfulMask);
+
+        // Find contours to separate characters
+        var contours = Cv2.FindContoursAsMat(colorfulMask, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+        LogMessage($"🔍 Found {contours.Length} contours for selective binarization");
+
+        if (contours.Length >= 1)
+        {
+            // Scale up for better processing
+            using var scaled = new Mat();
+            var newSize = new OpenCvSharp.Size(input.Width * 10, input.Height * 10);
+            Cv2.Resize(input, scaled, newSize, interpolation: InterpolationFlags.Lanczos4);
+
+            // Convert to grayscale
+            using var gray = new Mat();
+            Cv2.CvtColor(scaled, gray, ColorConversionCodes.BGR2GRAY);
+
+            // Create result image
+            using var result = Mat.Zeros(gray.Size(), MatType.CV_8UC1);
+
+            // Process each character separately
+            var characterContours = new List<Mat>();
+            foreach (var contour in contours)
+            {
+                var area = Cv2.ContourArea(contour);
+                var boundingRect = Cv2.BoundingRect(contour);
+                var aspectRatio = (double)boundingRect.Width / boundingRect.Height;
+                
+                if (area > 50 && area < 10000 && aspectRatio > 0.2 && aspectRatio < 3.0)
+                {
+                    characterContours.Add(contour);
+                }
+            }
+
+            // Sort contours by X position
+            characterContours = characterContours.OrderBy(c => Cv2.BoundingRect(c).X).ToList();
+            LogMessage($"🔍 Processing {characterContours.Count} characters individually");
+
+            foreach (var contour in characterContours)
+            {
+                var boundingRect = Cv2.BoundingRect(contour);
+                
+                // Extract character region
+                var charRoi = new Mat(gray, boundingRect);
+                
+                // Try different binarization methods for this character
+                var methods = new[]
+                {
+                    () => {
+                        using var binary = new Mat();
+                        Cv2.Threshold(charRoi, binary, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+                        return binary.Clone();
+                    },
+                    () => {
+                        using var binary = new Mat();
+                        Cv2.AdaptiveThreshold(charRoi, binary, 255, AdaptiveThresholdTypes.GaussianC, 
+                                            ThresholdTypes.Binary, 11, 2);
+                        return binary.Clone();
+                    },
+                    () => {
+                        using var binary = new Mat();
+                        Cv2.Threshold(charRoi, binary, 127, 255, ThresholdTypes.Binary);
+                        return binary.Clone();
+                    }
+                };
+
+                // Choose the best binarization method for this character
+                Mat? bestChar = null;
+                var bestScore = 0.0;
+
+                foreach (var method in methods)
+                {
+                    using var binary = method();
+                    
+                    // Calculate score based on character density and contrast
+                    var nonZeroPixels = Cv2.CountNonZero(binary);
+                    var totalPixels = binary.Rows * binary.Cols;
+                    var density = (double)nonZeroPixels / totalPixels;
+                    
+                    // Prefer characters with moderate density (not too sparse, not too dense)
+                    var score = 1.0 - Math.Abs(density - 0.3); // Target 30% density
+                    
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestChar?.Dispose();
+                        bestChar = binary.Clone();
+                    }
+                }
+
+                // Place the best binarized character in the result
+                if (bestChar != null)
+                {
+                    var resultRoi = new Mat(result, boundingRect);
+                    bestChar.CopyTo(resultRoi);
+                    bestChar.Dispose();
+                }
+            }
+
+            // Save result for debugging
+            var finalPath = Path.Combine("captcha_debug", $"selective_bin_final_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+            Cv2.ImWrite(finalPath, result);
+            LogMessage($"💾 Saved final: {finalPath}");
+
+            var preprocessResult = new PreprocessResult { ProcessedImage = result.ToMat(), Success = true, Method = "Selective Binarization" };
+            return preprocessResult;
+        }
+        else
+        {
+            LogMessage("⚠️ No contours found for selective binarization");
+            // Fallback to simple processing
+            using var gray = new Mat();
+            Cv2.CvtColor(input, gray, ColorConversionCodes.BGR2GRAY);
+            using var scaled = new Mat();
+            var newSize = new OpenCvSharp.Size(gray.Width * 10, gray.Height * 10);
+            Cv2.Resize(gray, scaled, newSize, interpolation: InterpolationFlags.Lanczos4);
+            using var binary = new Mat();
+            Cv2.Threshold(scaled, binary, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+            
+            var result = new PreprocessResult { ProcessedImage = binary.Clone(), Success = true, Method = "Selective Binarization (Fallback)" };
+            return result;
+        }
+    }
+
+    /// <summary>
     /// Preprocessing Method 1: Special handling for colorful captcha (w, g, g, s)
     /// </summary>
     private PreprocessResult ProcessWithColorfulCaptcha(Mat input)
@@ -1011,6 +1577,86 @@ public class GameCaptchaSolver : IDisposable
             { "wggr", "wggs" },  // r→s
             { "wggs", "wggs" },  // Already correct
             
+            // NEW: Common misreads for 'wwgt' (purple w, yellow w, pink g, light purple t)
+            { "wvmr", "wwgt" },  // v→w, m→g, r→t
+            { "wvmt", "wwgt" },  // v→w, m→g
+            { "wvgr", "wwgt" },  // v→w, r→t
+            { "wvgt", "wwgt" },  // v→w
+            { "wwmr", "wwgt" },  // m→g, r→t
+            { "wwmt", "wwgt" },  // m→g
+            { "wwgr", "wwgt" },  // r→t
+            { "wwgt", "wwgt" },  // Already correct
+            { "wvm", "wwgt" },   // v→w, add g, add t
+            { "wvg", "wwgt" },   // v→w, add t
+            { "wvt", "wwgt" },   // v→w, add g
+            { "wwm", "wwgt" },   // m→g, add t
+            { "wwg", "wwgt" },   // add t
+            { "wwt", "wwgt" },   // add g
+            
+            // NEW: Other common patterns for wwgt
+            { "wvmg", "wwgt" },  // v→w, m→g, g→t
+            { "wvmt", "wwgt" },  // v→w, m→g
+            { "wvgr", "wwgt" },  // v→w, r→t
+            { "wvgt", "wwgt" },  // v→w
+            { "wwmg", "wwgt" },  // m→g, g→t
+            { "wwmt", "wwgt" },  // m→g
+            { "wwgr", "wwgt" },  // r→t
+            { "wwgt", "wwgt" },  // Already correct
+            
+            // NEW: Common misreads for 'i see' (i-teal, s-brown, e-olive, e-green)
+            { "cciü", "i see" },  // c→i, c→s, i→e, ü→e
+            { "ccie", "i see" },  // c→i, c→s, i→e
+            { "csiü", "i see" },  // c→i, s→s, i→e, ü→e
+            { "csie", "i see" },  // c→i, s→s, i→e
+            { "iciü", "i see" },  // i→i, c→s, i→e, ü→e
+            { "icie", "i see" },  // i→i, c→s, i→e
+            { "isiü", "i see" },  // i→i, s→s, i→e, ü→e
+            { "isie", "i see" },  // i→i, s→s, i→e
+            { "i see", "i see" }, // Already correct
+            { "i see", "i see" }, // Already correct
+            { "i see", "i see" }, // Already correct
+            { "i see", "i see" }, // Already correct
+            
+            // NEW: Common misreads for 'gioq' (g-brown, i-green, o-red, q-blue)
+            { "boig", "gioq" },   // b→g, o→i, i→o, g→q
+            { "boiq", "gioq" },   // b→g, o→i, i→o
+            { "biog", "gioq" },   // b→g, i→i, o→o, g→q
+            { "bioq", "gioq" },   // b→g, i→i, o→o
+            { "goig", "gioq" },   // g→g, o→i, i→o, g→q
+            { "goiq", "gioq" },   // g→g, o→i, i→o
+            { "giog", "gioq" },   // g→g, i→i, o→o, g→q
+            { "gioq", "gioq" },   // Already correct
+            { "9 i", "gioq" },    // 9→g, space→i, i→o, add q
+            { "91", "gioq" },     // 9→g, 1→i, add o, add q
+            { "bo 16", "gioq" },  // b→g, o→i, space→o, 1→q, 6→remove
+            
+            // NEW: Common misreads for 'xewl' (x-green, e-pink, w-blue, l-orange)
+            { "xewi", "xewl" },   // i→l (i/l confusion)
+            { "xewI", "xewl" },   // I→l (I/l confusion)
+            { "x eWI", "xewl" },  // space→e, W→w, I→l
+            { "xew1", "xewl" },   // 1→l (1/l confusion)
+            { "xew|", "xewl" },   // |→l (|/l confusion)
+            { "xewl", "xewl" },   // Already correct
+            { "xewL", "xewl" },   // L→l (L/l confusion)
+            
+            // NEW: Common misreads for 'yzle' (y-golden, z-red, l-purple, e-blue)
+            { "yzie", "yzle" },   // i→l (i/l confusion)
+            { "yZIe", "yzle" },   // Z→z, I→l (I/l confusion)
+            { "yZle", "yzle" },   // Z→z
+            { "yzle", "yzle" },   // Already correct
+            { "yZLe", "yzle" },   // Z→z, L→l
+            { "yzie", "yzle" },   // i→l (i/l confusion)
+            
+            // NEW: Common misreads for 'opob' (o-brown, p-red, o-purple, b-teal)
+            { "hpob", "opob" },   // h→o (h/o confusion)
+            { "Hpob", "opob" },   // H→o (H/o confusion)
+            { "op o", "opob" },   // space→o, add b
+            { "op ob", "opob" },  // space→o
+            { "op\nb", "opob" },  // newline→o
+            { "opob", "opob" },   // Already correct
+            { "oPOb", "opob" },   // P→p, O→o, b→b
+            { "qodo", "opob" },   // q→o, o→p, d→o, o→b
+            
             // New patterns from log analysis
             { "jkns", "wggs" },  // j→w, k→g, n→g, s→s
             { "ngpf", "wggs" },  // n→w, g→g, p→g, f→s
@@ -1043,24 +1689,135 @@ public class GameCaptchaSolver : IDisposable
                 // Common misreads for 'w'
                 case 'y': corrected[i] = 'w'; break;
                 case 'j': corrected[i] = 'w'; break;
-                case 'B': corrected[i] = 'w'; break;
+                case 'v': 
+                    if (i == 0 || i == 1) corrected[i] = 'w'; // First two positions 'v' → 'w' (for wwgt)
+                    else corrected[i] = 'g'; // Other positions 'v' → 'g'
+                    break;
                 
                 // Common misreads for 'g'
-                case 'i': corrected[i] = 'g'; break;
                 case 'k': corrected[i] = 'g'; break;
-                case 'g': corrected[i] = 'g'; break; // Already correct
                 case 'E': corrected[i] = 'g'; break;
-                case 'p': corrected[i] = 'g'; break;
+                case 'm': 
+                    if (i == 2) corrected[i] = 'g'; // Third position 'm' → 'g' (for wwgt)
+                    else corrected[i] = 'g'; // Other positions 'm' → 'g'
+                    break;
                 
-                // Common misreads for 's'
-                case 'v': corrected[i] = 'g'; break;
-                case 'r': corrected[i] = 's'; break;
-                case 't': corrected[i] = 's'; break;
+                // Common misreads for 's' and 't'
+                case 'r': 
+                    if (i == 3) corrected[i] = 't'; // Last position 'r' → 't' (for wwgt)
+                    else corrected[i] = 's'; // Other positions 'r' → 's'
+                    break;
+                case 't': corrected[i] = 't'; break; // Already correct
                 case 'f': corrected[i] = 's'; break;
                 case 's': corrected[i] = 's'; break; // Already correct
                 case 'n': 
-                    if (i == 3) corrected[i] = 's'; // Last position 'n' → 's'
+                    if (i == 3) corrected[i] = 't'; // Last position 'n' → 't' (for wwgt)
                     else if (i == 0) corrected[i] = 'w'; // First position 'n' → 'w'
+                    else corrected[i] = 'g'; // Other positions 'n' → 'g'
+                    break;
+                
+                // NEW: Common misreads for 'i see' pattern
+                case 'c': 
+                    if (i == 0) corrected[i] = 'i'; // First position 'c' → 'i' (for i see)
+                    else if (i == 1) corrected[i] = 's'; // Second position 'c' → 's' (for i see)
+                    else corrected[i] = 'e'; // Other positions 'c' → 'e'
+                    break;
+                case 'ü': 
+                    corrected[i] = 'e'; // 'ü' → 'e' (for i see)
+                    break;
+                case 'e': corrected[i] = 'e'; break; // Already correct
+                
+                // NEW: Common misreads for 'gioq' pattern
+                case 'b': 
+                    if (i == 0) corrected[i] = 'g'; // First position 'b' → 'g' (for gioq)
+                    else corrected[i] = 'g'; // Other positions 'b' → 'g'
+                    break;
+                case 'o': 
+                    if (i == 1) corrected[i] = 'i'; // Second position 'o' → 'i' (for gioq)
+                    else if (i == 2) corrected[i] = 'o'; // Third position 'o' → 'o' (already correct)
+                    else corrected[i] = 'o'; // Other positions 'o' → 'o'
+                    break;
+                case 'i': 
+                    if (i == 1) corrected[i] = 'i'; // Second position 'i' → 'i' (already correct)
+                    else if (i == 2) 
+                    {
+                        // Third position 'i' - could be 'o' (gioq) or 'l' (yzle)
+                        // Check context: if previous chars suggest gioq pattern, use 'o', otherwise 'l'
+                        if (i >= 1 && corrected[0] == 'g' && corrected[1] == 'i')
+                            corrected[i] = 'o'; // gioq pattern
+                        else
+                            corrected[i] = 'l'; // yzle pattern (default for third position)
+                    }
+                    else corrected[i] = 'i'; // Other positions 'i' → 'i'
+                    break;
+                case 'g': 
+                    if (i == 0) corrected[i] = 'g'; // First position 'g' → 'g' (already correct)
+                    else if (i == 3) corrected[i] = 'q'; // Last position 'g' → 'q' (for gioq)
+                    else corrected[i] = 'g'; // Other positions 'g' → 'g'
+                    break;
+                case '9': 
+                    if (i == 0) corrected[i] = 'g'; // First position '9' → 'g' (for gioq)
+                    else corrected[i] = 'g'; // Other positions '9' → 'g'
+                    break;
+                case '1': 
+                    if (i == 1) corrected[i] = 'i'; // Second position '1' → 'i' (for gioq)
+                    else if (i == 3) 
+                    {
+                        // Last position '1' - could be 'q' (gioq) or 'l' (xewl)
+                        // Check context: if previous chars suggest gioq pattern, use 'q', otherwise 'l'
+                        if (i >= 2 && corrected[0] == 'g' && corrected[1] == 'i' && corrected[2] == 'o')
+                            corrected[i] = 'q'; // gioq pattern
+                        else
+                            corrected[i] = 'l'; // xewl pattern (default for last position)
+                    }
+                    else corrected[i] = 'i'; // Other positions '1' → 'i'
+                    break;
+                case '6': 
+                    corrected[i] = 'q'; // '6' → 'q' (for gioq)
+                    break;
+                
+                // NEW: Common misreads for 'xewl' pattern (i/l confusion)
+                case 'I': 
+                    // Since captchas are always lowercase, 'I' should always be 'l'
+                    // Check context to determine if it's more likely 'i' or 'l'
+                    if (i == 3) corrected[i] = 'l'; // Last position 'I' → 'l' (for xewl)
+                    else if (i == 2) corrected[i] = 'l'; // Third position 'I' → 'l' (for yzle)
+                    else corrected[i] = 'l'; // Default: 'I' → 'l' (captchas are lowercase)
+                    break;
+                case '|': 
+                    corrected[i] = 'l'; // '|' → 'l' (for xewl)
+                    break;
+                case 'L': 
+                    corrected[i] = 'l'; // 'L' → 'l' (for xewl)
+                    break;
+                case 'l': corrected[i] = 'l'; break; // Already correct
+                
+                // NEW: Common misreads for 'opob' pattern (h/o confusion)
+                case 'h': 
+                    if (i == 0) corrected[i] = 'o'; // First position 'h' → 'o' (for opob)
+                    else corrected[i] = 'o'; // Other positions 'h' → 'o'
+                    break;
+                case 'H': 
+                    if (i == 0) corrected[i] = 'o'; // First position 'H' → 'o' (for opob)
+                    else corrected[i] = 'o'; // Other positions 'H' → 'o'
+                    break;
+                case 'P': corrected[i] = 'p'; break; // P→p
+                case 'O': corrected[i] = 'o'; break; // O→o
+                case 'B': corrected[i] = 'b'; break; // B→b
+                
+                // NEW: Common misreads for 'yzle' pattern (Z/z confusion)
+                case 'Z': 
+                    if (i == 1) corrected[i] = 'z'; // Second position 'Z' → 'z' (for yzle)
+                    else corrected[i] = 'z'; // Other positions 'Z' → 'z'
+                    break;
+                
+                case 'q': 
+                    if (i == 0) corrected[i] = 'o'; // First position 'q' → 'o' (for opob)
+                    else corrected[i] = 'o'; // Other positions 'q' → 'o'
+                    break;
+                case 'd': 
+                    if (i == 2) corrected[i] = 'o'; // Third position 'd' → 'o' (for opob)
+                    else corrected[i] = 'o'; // Other positions 'd' → 'o'
                     break;
             }
         }
@@ -2036,13 +2793,13 @@ public class GameCaptchaSolver : IDisposable
             bitmap.Save(memoryStream, System.Drawing.Imaging.ImageFormat.Png);
             using var pix = Pix.LoadFromMemory(memoryStream.ToArray());
             
-            // Try multiple PSM modes for better results
+            // Try multiple PSM modes for better results - OPTIMIZED for colorful captcha
             var psmModes = new[] { 
-                PageSegMode.SingleWord,      // Best for single word captcha
+                PageSegMode.RawLine,         // BEST for colorful captcha - often gives correct results
+                PageSegMode.SingleChar,      // Good for colorful captcha - each character separately
+                PageSegMode.SingleWord,      // Good for single word captcha
                 PageSegMode.SingleLine,      // Good for horizontal text
-                PageSegMode.SingleBlock,     // Good for block of text
-                PageSegMode.RawLine,         // Raw line without layout analysis
-                PageSegMode.SingleChar       // Single character mode
+                PageSegMode.SingleBlock      // Good for block of text
             };
             var bestResult = "";
             var bestConfidence = 0f;
@@ -2059,9 +2816,17 @@ public class GameCaptchaSolver : IDisposable
                 // Priority 1: Non-empty text with confidence > 0
                 if (!string.IsNullOrEmpty(text) && confidence > 0)
                 {
-                    if (bestResult == "" || confidence > bestConfidence)
+                    // NEW: Boost confidence for results that look more accurate
+                    var boostedConfidence = confidence;
+                    if (text.Length == 4 && text.All(char.IsLetter) && !text.Contains(" ") && !text.Contains("."))
                     {
-                        bestConfidence = confidence;
+                        boostedConfidence += 10f; // Boost for clean 4-letter results
+                        LogMessage($"🔍 Boosted confidence for clean result '{text}': {confidence}% → {boostedConfidence}%");
+                    }
+                    
+                    if (bestResult == "" || boostedConfidence > bestConfidence)
+                    {
+                        bestConfidence = boostedConfidence;
                         bestResult = text;
                         bestPsmMode = psmMode;
                     }

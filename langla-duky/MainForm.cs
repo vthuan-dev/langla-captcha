@@ -401,6 +401,7 @@ namespace langla_duky
             {
                 _gameCaptchaSolver = new GameCaptchaSolver("./tessdata", LogMessage);
                 LogMessage("✅ Initialized GameCaptchaSolver with DPI 300");
+                LogMessage("🎨 NEW: Color-Aware processing enabled for colorful captchas (jsjx, etc.)");
             }
             catch (Exception ex)
             {
@@ -750,7 +751,15 @@ namespace langla_duky
                 ShowMessage("Please select a valid game window first.", "Error", MessageBoxIcon.Error);
                 return;
             }
-            LogMessage("Testing OCR (OpenCV + Tesseract)...");
+            
+            if (_gameCaptchaSolver == null)
+            {
+                LogMessage("❌ GameCaptchaSolver not initialized");
+                ShowMessage("GameCaptchaSolver not initialized", "Error", MessageBoxIcon.Error);
+                return;
+            }
+            
+            LogMessage("🧪 Testing OCR with NEW Color-Aware processing...");
             try
             {
                 var roi = GetEffectiveCaptchaArea();
@@ -773,6 +782,12 @@ namespace langla_duky
                     }
                     using (bmp)
                     {
+                        // Save test image for GameCaptchaSolver
+                        var testPath = Path.Combine("captcha_debug", $"test_captcha_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+                        Directory.CreateDirectory("captcha_debug");
+                        bmp.Save(testPath);
+                        LogMessage($"💾 Saved test image: {testPath}");
+                        
                         // Display captured captcha image in UI for test
                         this.Invoke(() => {
                             _picCaptcha.Image?.Dispose();
@@ -782,23 +797,32 @@ namespace langla_duky
                             LogMessage($"🖼️ Test captcha image displayed in UI: {bmp.Width}x{bmp.Height}");
                         });
                         
-                        string text = SolveCaptchaWithOpenCVAndTesseract(bmp) ?? string.Empty;
-                        if (!string.IsNullOrEmpty(text))
+                        // Use NEW GameCaptchaSolver with Color-Aware processing
+                        LogMessage("🎨 Using NEW Color-Aware processing flow...");
+                        var result = _gameCaptchaSolver.SolveCaptcha(testPath);
+                        
+                        if (result.Success)
                         {
-                            _lastCaptchaText = text;
-                            LogMessage($"✅ Test successful: '{text}' via {_lastOcrMethod}");
-                            summary = $"ROI={roi} | Image={bmp.Width}x{bmp.Height} | Method={_lastOcrMethod} | Result='{text}'";
+                            _lastCaptchaText = result.Text;
+                            LogMessage($"✅ Test successful: '{result.Text}' (confidence: {result.Confidence:F1}%, method: {result.Method})");
+                            summary = $"ROI={roi} | Image={bmp.Width}x{bmp.Height} | Method={result.Method} | Result='{result.Text}' | Confidence={result.Confidence:F1}%";
+                            
+                            // Check if result is from Color-Aware method
+                            if (result.Method.Contains("Color-Aware") || result.Method.Contains("Character Segmentation") || result.Method.Contains("Selective Binarization"))
+                            {
+                                LogMessage("🎨 SUCCESS: Color-Aware processing worked!");
+                            }
                         }
                         else
                         {
-                            LogMessage("❌ Test failed: empty result");
-                            summary = $"ROI={roi} | Image={bmp.Width}x{bmp.Height} | Result=empty";
+                            LogMessage($"❌ Test failed: {result.Error}");
+                            summary = $"ROI={roi} | Image={bmp.Width}x{bmp.Height} | Result=failed: {result.Error}";
                         }
                     }
                 });
                 if (!string.IsNullOrEmpty(summary))
                 {
-                    ShowMessage(summary, "OpenCV + Tesseract Test Result", MessageBoxIcon.Information);
+                    ShowMessage(summary, "Color-Aware OCR Test Result", MessageBoxIcon.Information);
                 }
             }
             catch (Exception ex)
