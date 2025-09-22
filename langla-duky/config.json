@@ -8,12 +8,12 @@
     "Height": 6
   },
   "InputFieldPosition": {
-    "X": 640,
-    "Y": 430
+    "X": 550,
+    "Y": 330
   },
   "ConfirmButtonPosition": {
-    "X": 640,
-    "Y": 510
+    "X": 523,
+    "Y": 438
   },
   "UseAbsoluteCoordinates": false,
   "UseRelativeCoordinates": true,
@@ -22,10 +22,10 @@
   "CaptchaTopY": 304,
   "CaptchaRightX": 630,
   "CaptchaBottomY": 310,
-  "InputFieldX": 640,
-  "InputFieldY": 430,
-  "ConfirmButtonX": 640,
-  "ConfirmButtonY": 510,
+  "InputFieldX": 550,
+  "InputFieldY": 330,
+  "ConfirmButtonX": 523,
+  "ConfirmButtonY": 438,
   "OCRSettings": {
     "TessdataPath": "./tessdata",
     "Language": "eng",

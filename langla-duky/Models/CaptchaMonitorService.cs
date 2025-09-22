@@ -265,14 +265,10 @@ namespace langla_duky.Models
                 InputAutomation.SendTextToWindow(_gameWindowHandle, captchaText);
                 await Task.Delay(config.AutomationSettings.DelayAfterInput);
                 
-                // Press Enter to submit
-                OnStatusChanged($"⌨️ Pressing Enter to submit");
-                InputAutomation.SendKeyPress(_gameWindowHandle, 0x0D); // VK_RETURN
-                await Task.Delay(config.AutomationSettings.DelayAfterInput);
-                
-                // Also click confirm button as backup
-                OnStatusChanged($"🖱️ Clicking confirm button as backup");
+                // Click confirm button instead of pressing Enter (to avoid exiting game)
+                OnStatusChanged($"🖱️ Clicking confirm button at ({confirmPoint.X},{confirmPoint.Y})");
                 InputAutomation.ClickInWindow(_gameWindowHandle, confirmPoint);
+                await Task.Delay(config.AutomationSettings.DelayAfterInput);
                 
                 OnStatusChanged("✅ Captcha auto-filled and submitted successfully");
             }

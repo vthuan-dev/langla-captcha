@@ -1992,18 +1992,20 @@ namespace langla_duky
                 confirmPointClient = cfg.ConfirmButtonPosition;
             }
 
+            // Click input field first
+            LogMessage($"🖱️ Clicking input field at ({inputPointClient.X},{inputPointClient.Y})");
             InputAutomation.ClickInWindow(_selectedGameWindow!.Handle, inputPointClient);
             await Task.Delay(cfg.AutomationSettings.DelayAfterClick, token);
+            
+            // Type captcha text
+            LogMessage($"⌨️ Typing captcha: '{captchaText}'");
             InputAutomation.SendTextToWindow(_selectedGameWindow!.Handle, captchaText);
             await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token); 
             
-            // Press Enter after typing the captcha text
-            LogMessage($"⌨️ Pressing Enter after typing captcha: '{captchaText}'");
-            InputAutomation.SendKeyPress(_selectedGameWindow!.Handle, 0x0D); // VK_RETURN = 0x0D
-            await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token);
-
-            // Also click confirm button as backup
+            // Click confirm button instead of pressing Enter (to avoid exiting game)
+            LogMessage($"🖱️ Clicking confirm button at ({confirmPointClient.X},{confirmPointClient.Y})");
             InputAutomation.ClickInWindow(_selectedGameWindow!.Handle, confirmPointClient);
+            await Task.Delay(cfg.AutomationSettings.DelayAfterInput, token);
         }
         private void DrawROIRectangle(Rectangle rect, string label)
         {
