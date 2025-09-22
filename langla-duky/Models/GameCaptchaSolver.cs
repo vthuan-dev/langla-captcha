@@ -16,7 +16,13 @@ public class GameCaptchaSolver : IDisposable
     private readonly string _tessdataPath;
     private bool _disposed = false;
     private Action<string>? _logMessage;
-    private readonly string _ocrSpaceApiKey = "K84148904688957";
+    private readonly string[] _ocrSpaceApiKeys = {
+        "K84148904688957",
+        "K88398819088957", 
+        "K89439599888957",
+        "K85004482088957"
+    };
+    private int _currentApiKeyIndex = 0;
     private readonly RestClient _restClient;
 
     public GameCaptchaSolver(string tessdataPath = @"./tessdata", Action<string>? logMessage = null)
@@ -330,7 +336,14 @@ public class GameCaptchaSolver : IDisposable
                 var tesseractAccurate = tesseractResults.Where(c => 
                     c.Text.Length == 4 && 
                     (c.Text.All(char.IsLetter) || c.Text.All(char.IsDigit)) &&
-                    !c.Text.Contains(" ") && !c.Text.Contains(".") && !c.Text.Contains(",")
+                    !c.Text.Contains(" ") && !c.Text.Contains(".") && !c.Text.Contains(",") &&
+                    // Additional check: avoid obviously wrong results like "beei" for "tkvW"
+                    !c.Text.Contains("ee") && !c.Text.Contains("ii") && !c.Text.Contains("oo") &&
+                    c.Text.Count(char.IsUpper) <= 2 && // Most captchas have 0-2 uppercase letters
+                    // Reject common OCR errors
+                    !c.Text.Equals("beei", StringComparison.OrdinalIgnoreCase) &&
+                    !c.Text.Equals("beel", StringComparison.OrdinalIgnoreCase) &&
+                    !c.Text.Equals("beel", StringComparison.OrdinalIgnoreCase)
                 ).ToList();
                 
                 if (tesseractAccurate.Any())
@@ -343,13 +356,27 @@ public class GameCaptchaSolver : IDisposable
                 {
                     LogMessage($"🎨 Found {colorAwareResults.Count} Color-Aware results - PRIORITIZING these for colorful captchas!");
                     // Color-Aware results get priority for colorful captchas
-                    correctLengthCandidates = colorAwareResults.Concat(tesseractResults).Concat(apiResults).ToList();
+                    correctLengthCandidates = colorAwareResults.Concat(apiResults).Concat(tesseractResults).ToList();
                 }
                 else if (apiResults.Any())
                 {
-                    LogMessage($"🌐 Found {apiResults.Count} API results - using as fallback");
-                    // API results as fallback
-                    correctLengthCandidates = apiResults.Concat(tesseractResults).ToList();
+                    LogMessage($"🌐 Found {apiResults.Count} API results - checking for accuracy");
+                    // Check if API results look more accurate than Tesseract
+                    var accurateApiResults = apiResults.Where(c => 
+                        !c.Text.Contains("ee") && !c.Text.Contains("ii") && !c.Text.Contains("oo") &&
+                        c.Text.Count(char.IsUpper) <= 2
+                    ).ToList();
+                    
+                    if (accurateApiResults.Any())
+                    {
+                        LogMessage($"🌐 Found {accurateApiResults.Count} accurate API results - PRIORITIZING over Tesseract!");
+                        correctLengthCandidates = accurateApiResults.Concat(apiResults.Except(accurateApiResults)).Concat(tesseractResults).ToList();
+                    }
+                    else
+                    {
+                        LogMessage($"🌐 Using API results as fallback");
+                        correctLengthCandidates = apiResults.Concat(tesseractResults).ToList();
+                    }
                 }
                 }
                 
@@ -657,8 +684,8 @@ public class GameCaptchaSolver : IDisposable
             var width = Math.Min(input.Width - x, boundingRect.Width + 2 * padding);
             var height = Math.Min(input.Height - y, boundingRect.Height + 2 * padding);
             
-            // Only crop if there's significant difference
-            if (width < input.Width - 10 || height < input.Height - 10)
+            // Only crop if there's significant difference - be more conservative
+            if (width < input.Width - 20 || height < input.Height - 20)
             {
                 var roi = new OpenCvSharp.Rect(x, y, width, height);
                 var cropped = new Mat(input, roi);
@@ -1170,8 +1197,8 @@ public class GameCaptchaSolver : IDisposable
                 var boundingRect = Cv2.BoundingRect(contour);
                 var aspectRatio = (double)boundingRect.Width / boundingRect.Height;
                 
-                // Filter for character-like shapes
-                if (area > 100 && area < 50000 && aspectRatio > 0.2 && aspectRatio < 3.0)
+                // More lenient filtering for character-like shapes to catch smaller characters
+                if (area > 50 && area < 100000 && aspectRatio > 0.1 && aspectRatio < 5.0)
                 {
                     characterContours.Add(contour);
                     LogMessage($"🔍 Added character contour: area={area:F0}, aspect={aspectRatio:F2}, rect={boundingRect}");
@@ -2699,72 +2726,155 @@ public class GameCaptchaSolver : IDisposable
     /// </summary>
     private OCRResult PerformOCRWithSpaceAPI(Mat processedImage)
     {
-        try
+        // Try each API key until one works
+        for (int attempt = 0; attempt < _ocrSpaceApiKeys.Length; attempt++)
         {
-            LogMessage("🌐 Using OCR.space API...");
-
-            // Convert Mat to byte array
-            using var bitmap = OpenCvSharp.Extensions.BitmapConverter.ToBitmap(processedImage);
-            using var memoryStream = new MemoryStream();
-            bitmap.Save(memoryStream, System.Drawing.Imaging.ImageFormat.Png);
-            var imageBytes = memoryStream.ToArray();
-
-            // Create request with POST method
-            var request = new RestRequest();
-            request.Method = RestSharp.Method.Post;
-            request.AddHeader("apikey", _ocrSpaceApiKey);
-            
-            // Add file as form data
-            request.AddFile("file", imageBytes, "captcha.png", "image/png");
-            
-            // Add parameters as form data
-            request.AddParameter("language", "eng");
-            request.AddParameter("isOverlayRequired", "false");
-            request.AddParameter("detectOrientation", "false");
-            request.AddParameter("scale", "true");
-            request.AddParameter("OCREngine", "2"); // Engine 2 for better accuracy
-
-            // Execute request
-            LogMessage($"🌐 Sending request to OCR.space API...");
-            LogMessage($"🌐 Request method: {request.Method}");
-            LogMessage($"🌐 Request headers: {string.Join(", ", request.Parameters.Where(p => p.Type == ParameterType.HttpHeader).Select(p => $"{p.Name}={p.Value}"))}");
-            LogMessage($"🌐 Request parameters: {string.Join(", ", request.Parameters.Where(p => p.Type == ParameterType.GetOrPost).Select(p => $"{p.Name}={p.Value}"))}");
-            
-            var response = _restClient.Execute(request);
-            
-            LogMessage($"🌐 Response status: {response.ResponseStatus}");
-            LogMessage($"🌐 Response status code: {response.StatusCode}");
-            LogMessage($"🌐 Response content: {response.Content}");
-            
-            if (response.IsSuccessful && !string.IsNullOrEmpty(response.Content))
+            try
             {
-                var apiResponse = JsonConvert.DeserializeObject<OcrSpaceResponse>(response.Content);
+                var currentApiKey = _ocrSpaceApiKeys[_currentApiKeyIndex];
+                LogMessage($"🌐 Using OCR.space API (Key {_currentApiKeyIndex + 1}/{_ocrSpaceApiKeys.Length}): {MaskApiKey(currentApiKey)}");
+
+                // Convert Mat to byte array
+                using var bitmap = OpenCvSharp.Extensions.BitmapConverter.ToBitmap(processedImage);
+                using var memoryStream = new MemoryStream();
+                bitmap.Save(memoryStream, System.Drawing.Imaging.ImageFormat.Png);
+                var imageBytes = memoryStream.ToArray();
+
+                // Create request with POST method
+                var request = new RestRequest();
+                request.Method = RestSharp.Method.Post;
+                request.AddHeader("apikey", currentApiKey);
                 
-                if (apiResponse?.ParsedResults?.Count > 0)
+                // Add file as form data
+                request.AddFile("file", imageBytes, "captcha.png", "image/png");
+                
+                // Add parameters as form data
+                request.AddParameter("language", "eng");
+                request.AddParameter("isOverlayRequired", "false");
+                request.AddParameter("detectOrientation", "false");
+                request.AddParameter("scale", "true");
+                request.AddParameter("OCREngine", "2"); // Engine 2 for better accuracy
+
+                // Execute request
+                LogMessage($"🌐 Sending request to OCR.space API...");
+                
+                var response = _restClient.Execute(request);
+                
+                LogMessage($"🌐 Response status: {response.ResponseStatus}");
+                LogMessage($"🌐 Response status code: {response.StatusCode}");
+                LogMessage($"🌐 Response content: {response.Content}");
+                
+                if (response.IsSuccessful && !string.IsNullOrEmpty(response.Content))
                 {
-                    var result = apiResponse.ParsedResults[0];
-                    var text = result.ParsedText?.Trim() ?? "";
-                    var confidence = result.TextOverlay?.Lines?.FirstOrDefault()?.Words?.FirstOrDefault()?.Confidence ?? 0f;
+                    var apiResponse = JsonConvert.DeserializeObject<OcrSpaceResponse>(response.Content);
                     
-                    LogMessage($"🌐 OCR.space result: '{text}' (confidence: {confidence:F1}%)");
-                    
-                    return new OCRResult
+                    if (apiResponse?.ParsedResults?.Count > 0)
                     {
-                        Text = text,
-                        Confidence = confidence,
-                        Success = !string.IsNullOrEmpty(text)
-                    };
+                        var result = apiResponse.ParsedResults[0];
+                        var text = result.ParsedText?.Trim() ?? "";
+                        var confidence = result.TextOverlay?.Lines?.FirstOrDefault()?.Words?.FirstOrDefault()?.Confidence ?? 0f;
+                        
+                        LogMessage($"🌐 OCR.space result: '{text}' (confidence: {confidence:F1}%)");
+                        
+                        return new OCRResult
+                        {
+                            Text = text,
+                            Confidence = confidence,
+                            Success = !string.IsNullOrEmpty(text)
+                        };
+                    }
+                    else
+                    {
+                        LogMessage($"🌐 API error: {apiResponse?.ErrorMessage ?? "Unknown error"}");
+                        
+                        // Check if it's a quota/rate limit error and try next key
+                        if (IsRateLimitError(apiResponse?.ErrorMessage, response.Content))
+                        {
+                            LogMessage($"🔄 API key {_currentApiKeyIndex + 1} rate limited/quota exceeded, trying next key...");
+                            _currentApiKeyIndex = (_currentApiKeyIndex + 1) % _ocrSpaceApiKeys.Length;
+                            continue; // Try next API key
+                        }
+                        else
+                        {
+                            // If it's not a rate limit error, return failure
+                            LogMessage($"❌ API key {_currentApiKeyIndex + 1} failed with non-rate-limit error");
+                            return new OCRResult { Success = false };
+                        }
+                    }
+                }
+                else
+                {
+                    LogMessage($"🌐 API request failed: {response.ErrorMessage ?? response.Content}");
+                    
+                    // Check if it's a quota/rate limit error and try next key
+                    if (IsRateLimitError(response.Content, response.StatusCode))
+                    {
+                        LogMessage($"🔄 API key {_currentApiKeyIndex + 1} rate limited/quota exceeded, trying next key...");
+                        _currentApiKeyIndex = (_currentApiKeyIndex + 1) % _ocrSpaceApiKeys.Length;
+                        continue; // Try next API key
+                    }
+                    else
+                    {
+                        // If it's not a rate limit error, return failure
+                        LogMessage($"❌ API key {_currentApiKeyIndex + 1} failed with non-rate-limit error");
+                        return new OCRResult { Success = false };
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                LogMessage($"🔥 OCR.space API Error (Key {_currentApiKeyIndex + 1}): {ex.Message}");
+                
+                // Try next API key on exception
+                _currentApiKeyIndex = (_currentApiKeyIndex + 1) % _ocrSpaceApiKeys.Length;
+                continue;
+            }
+        }
+        
+        LogMessage("❌ All OCR.space API keys exhausted or failed");
+        return new OCRResult { Success = false };
+    }
+    
+    /// <summary>
+    /// Check if the error is a rate limit/quota error
+    /// </summary>
+    private bool IsRateLimitError(string? errorMessage, string? responseContent)
+    {
+        if (string.IsNullOrEmpty(errorMessage) && string.IsNullOrEmpty(responseContent))
+            return false;
             
-            LogMessage($"⚠️ OCR.space API failed: {response.ErrorMessage ?? response.Content}");
-            return new OCRResult { Success = false };
-        }
-        catch (Exception ex)
+        var content = (errorMessage ?? "") + " " + (responseContent ?? "");
+        content = content.ToLower();
+        
+        return content.Contains("quota") || 
+               content.Contains("limit") || 
+               content.Contains("maximum") ||
+               content.Contains("rate limit") ||
+               content.Contains("too many requests") ||
+               content.Contains("exceeded") ||
+               content.Contains("daily limit") ||
+               content.Contains("monthly limit");
+    }
+    
+    /// <summary>
+    /// Check if the HTTP status code indicates rate limit
+    /// </summary>
+    private bool IsRateLimitError(string? responseContent, System.Net.HttpStatusCode statusCode)
+    {
+        if (statusCode == System.Net.HttpStatusCode.TooManyRequests ||
+            statusCode == System.Net.HttpStatusCode.Forbidden ||
+            statusCode == System.Net.HttpStatusCode.Unauthorized)
         {
-            LogMessage($"🔥 OCR.space API Error: {ex.Message}");
-            return new OCRResult { Success = false };
+            return true;
         }
+        
+        return IsRateLimitError(responseContent, null);
+    }
+    
+    private string MaskApiKey(string apiKey)
+    {
+        if (string.IsNullOrEmpty(apiKey) || apiKey.Length <= 8) return "****";
+        return apiKey.Substring(0, 4) + "****" + apiKey.Substring(apiKey.Length - 4);
     }
 
     /// <summary>

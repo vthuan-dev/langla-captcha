@@ -573,83 +573,31 @@ namespace langla_duky
                 _btnStartMonitoring.Enabled = false;
                 _btnStop.Enabled = true;
                 _btnStopMonitoring.Enabled = true;
-                _lblStatus.Text = "Status: Initializing...";
-                _lblStatus.ForeColor = WarningOrange;
+                _lblStatus.Text = "Status: Monitoring...";
+                _lblStatus.ForeColor = SuccessGreen;
+                _lblMonitoringStatus.Text = "Monitoring: Active";
+                _lblMonitoringStatus.ForeColor = SuccessGreen;
 
-                LogMessage("One-shot: Capturing captcha area...");
+                LogMessage("🔄 Starting continuous captcha monitoring...");
+                LogMessage("📡 Monitoring mode: Smart detection (screenshots every 2-5 seconds)");
+                LogMessage("🎯 Will automatically solve captcha when detected");
 
-                using (var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
-                {
-                    try
-                    {
-                        int attempts = Math.Max(1, _config.AutomationSettings?.MaxRetries ?? 1);
-                        bool success = false;
-                        for (int i = 1; i <= attempts; i++)
-                        {
-                            LogMessage($"Attempt {i}/{attempts}: capturing and solving captcha...");
-                            var bmp = await Task.Run(() => CaptureCaptchaAreaBitmap(), timeoutCts.Token);
-                            if (bmp == null)
-                            {
-                                LogMessage("No captcha image captured.");
-                            }
-                            else
-                            {
-                                using (bmp)
-                                {
-                                    // Display captured captcha image in UI
-                                    await this.InvokeAsync(() => {
-                                        _picCaptcha.Image?.Dispose();
-                                        _picCaptcha.Image = new Bitmap(bmp);
-                                        _lblImageInfo.Text = $"Captcha: {bmp.Width}x{bmp.Height} | Area: {_lastCapturedArea}";
-                                        _lblImageInfo.ForeColor = SuccessGreen;
-                                        LogMessage($"🖼️ Captcha image displayed in UI: {bmp.Width}x{bmp.Height}");
-                                    });
-                                    
-                                    string? text = SolveCaptchaWithOpenCVAndTesseract(bmp);
-                                    if (!string.IsNullOrEmpty(text))
-                                    {
-                                        _lastCaptchaText = text;
-                                        LogMessage($"Captcha solved: '{text}'");
-                                        await TypeAndConfirmAsync(text, timeoutCts.Token);
-                                        _successCount++;
-                                        LogMessage("Processing result: Success");
-                                        success = true;
-                                        break;
-                                    }
-                                    else
-                                    {
-                                        _failureCount++;
-                                        LogMessage("Processing result: Failure (empty OCR)");
-                                    }
-                                }
-                            }
-                            if (i < attempts)
-                            {
-                                await Task.Delay(_config.AutomationSettings?.DelayBetweenAttempts ?? 1000, timeoutCts.Token);
-                            }
-                        }
-                        if (!success)
-                        {
-                            LogMessage("All attempts failed.");
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        LogMessage("One-shot: Operation timed out.");
-                    }
-                }
-
-                LogMessage("One-shot operation completed.");
+                // Start continuous monitoring task
+                _monitoringCts = new CancellationTokenSource();
+                _monitoringTask = Task.Run(() => ContinuousMonitoringLoop(_monitoringCts.Token), _monitoringCts.Token);
+                
+                // Start watchdog timer
+                _watchdogTimer.Start();
+                
+                LogMessage("✅ Continuous monitoring started successfully!");
             }
             catch (Exception ex)
             {
                 _lblStatus.Text = "Status: Error";
                 _lblStatus.ForeColor = DangerRed;
                 LogMessage($"Failed to start monitoring: {ex.Message}");
-            }
-            finally
-            {
-                // Always reset UI state
+                
+                // Reset UI state on error
                 _isMonitoring = false;
                 _btnStart.Enabled = true;
                 _btnStartMonitoring.Enabled = true;
@@ -673,11 +621,26 @@ namespace langla_duky
             await this.InvokeAsync(() => {
                 _lblStatus.Text = "Status: Stopping...";
                 _lblStatus.ForeColor = WarningOrange;
+                LogMessage("🛑 Stopping continuous monitoring...");
             });
 
             try
             {
-                // one-shot: nothing to cancel
+                // Cancel continuous monitoring task
+                _monitoringCts?.Cancel();
+                
+                // Wait for monitoring task to complete (with timeout)
+                if (_monitoringTask != null)
+                {
+                    try
+                    {
+                        await _monitoringTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (TimeoutException)
+                    {
+                        LogMessage("⚠️ Monitoring task did not stop gracefully, forcing stop.");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -700,8 +663,167 @@ namespace langla_duky
                     _lblStatus.ForeColor = SecondaryBlue;
                     _lblMonitoringStatus.Text = "Monitoring: Stopped";
                     _lblMonitoringStatus.ForeColor = SecondaryBlue;
-                    LogMessage("Monitoring stopped successfully.");
+                    LogMessage("✅ Continuous monitoring stopped successfully.");
                 });
+            }
+        }
+
+        private async Task ContinuousMonitoringLoop(CancellationToken token)
+        {
+            LogMessage("🔄 Continuous monitoring loop started on background thread.");
+            var stopwatch = new Stopwatch();
+            var lastCaptchaTime = DateTime.MinValue;
+            var monitoringInterval = TimeSpan.FromSeconds(3); // Default 3 seconds
+            var fastInterval = TimeSpan.FromSeconds(1); // Fast mode when activity detected
+            var currentInterval = monitoringInterval;
+            var consecutiveEmptyCaptures = 0;
+            var maxEmptyCaptures = 10; // Switch to slow mode after 10 empty captures
+
+            while (!token.IsCancellationRequested)
+            {
+                stopwatch.Restart();
+                try
+                {
+                    if (_selectedGameWindow == null || !_selectedGameWindow.IsValid())
+                    {
+                        await this.InvokeAsync(() => LogMessage("❌ Game window became invalid. Stopping monitoring."));
+                        break; 
+                    }
+
+                    // Capture and analyze captcha area
+                    var bmp = await Task.Run(() => CaptureCaptchaAreaBitmap(), token);
+                    if (bmp != null)
+                    {
+                        using (bmp)
+                        {
+                            // Check if image has changed significantly (captcha appeared)
+                            if (HasSignificantChange(bmp))
+                            {
+                                await this.InvokeAsync(() => {
+                                    LogMessage("🔍 Captcha detected! Processing...");
+                                    _lblStatus.Text = "Status: Solving Captcha...";
+                                    _lblStatus.ForeColor = WarningOrange;
+                                });
+
+                                // Display captured captcha image in UI
+                                await this.InvokeAsync(() => {
+                                    _picCaptcha.Image?.Dispose();
+                                    _picCaptcha.Image = new Bitmap(bmp);
+                                    _lblImageInfo.Text = $"Captcha: {bmp.Width}x{bmp.Height} | Area: {_lastCapturedArea}";
+                                    _lblImageInfo.ForeColor = SuccessGreen;
+                                });
+                                
+                                // Solve captcha
+                                string? text = await Task.Run(() => SolveCaptchaWithOpenCVAndTesseract(bmp), token);
+                                if (!string.IsNullOrEmpty(text))
+                                {
+                                    _lastCaptchaText = text;
+                                    lastCaptchaTime = DateTime.Now;
+                                    
+                                    await this.InvokeAsync(() => {
+                                        LogMessage($"✅ Captcha solved: '{text}'");
+                                        _lblStatus.Text = "Status: Auto-filling...";
+                                        _lblStatus.ForeColor = PrimaryBlue;
+                                    });
+                                    
+                                    // Auto-fill captcha
+                                    await TypeAndConfirmAsync(text, token);
+                                    
+                                    _successCount++;
+                                    await this.InvokeAsync(() => {
+                                        LogMessage("🎯 Captcha auto-solved successfully!");
+                                        _lblStatus.Text = "Status: Monitoring...";
+                                        _lblStatus.ForeColor = SuccessGreen;
+                                    });
+                                    
+                                    // Switch to fast mode briefly after solving
+                                    currentInterval = fastInterval;
+                                    consecutiveEmptyCaptures = 0;
+                                }
+                                else
+                                {
+                                    _failureCount++;
+                                    await this.InvokeAsync(() => {
+                                        LogMessage("❌ Failed to solve captcha");
+                                        _lblStatus.Text = "Status: Monitoring...";
+                                        _lblStatus.ForeColor = SuccessGreen;
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                consecutiveEmptyCaptures++;
+                                
+                                // Switch to slow mode if no activity for a while
+                                if (consecutiveEmptyCaptures >= maxEmptyCaptures)
+                                {
+                                    currentInterval = monitoringInterval;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        consecutiveEmptyCaptures++;
+                        await this.InvokeAsync(() => LogMessage("⚠️ Failed to capture captcha area"));
+                    }
+                    
+                    stopwatch.Stop();
+                    var elapsed = stopwatch.ElapsedMilliseconds;
+                    
+                    // Log monitoring status every 30 seconds
+                    if (DateTime.Now.Second % 30 == 0)
+                    {
+                        await this.InvokeAsync(() => {
+                            LogMessage($"📊 Monitoring: {elapsed}ms cycle, interval: {currentInterval.TotalSeconds}s, empty: {consecutiveEmptyCaptures}");
+                        });
+                    }
+
+                    // Wait for next monitoring cycle
+                    await Task.Delay(currentInterval, token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    LogMessage("🛑 Continuous monitoring cancelled.");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    await this.InvokeAsync(() => LogMessage($"❌ Error in continuous monitoring: {ex.Message}"));
+                    await Task.Delay(5000, token); // Wait 5 seconds on error
+                }
+            }
+            
+            await this.InvokeAsync(() => {
+                LogMessage("🔄 Continuous monitoring loop exited.");
+                _lblStatus.Text = "Status: Idle";
+                _lblStatus.ForeColor = SecondaryBlue;
+            });
+        }
+
+        private bool HasSignificantChange(Bitmap currentImage)
+        {
+            try
+            {
+                // Simple change detection: check if image is not mostly solid color
+                var colors = new Dictionary<Color, int>();
+                var sampleSize = Math.Min(20, Math.Min(currentImage.Width, currentImage.Height));
+                
+                for (int x = 0; x < sampleSize; x += 2)
+                {
+                    for (int y = 0; y < sampleSize; y += 2)
+                    {
+                        var color = currentImage.GetPixel(x, y);
+                        colors[color] = colors.GetValueOrDefault(color, 0) + 1;
+                    }
+                }
+                
+                // If we have more than 3 distinct colors, likely has content
+                return colors.Count > 3;
+            }
+            catch
+            {
+                return true; // Assume change if we can't analyze
             }
         }
 
@@ -1638,11 +1760,12 @@ namespace langla_duky
             // Draw ROI rectangle on screen for debugging before capture
             DrawROIRectangle(area, "Detected ROI");
             
-            // Minimal padding for very small images to avoid cutting off glyph edges
+            // Increased padding for captcha images to avoid cutting off characters
             try
             {
-                int padX = Math.Max(1, area.Width / 35);   // ~2.9% for very small images
-                int padY = Math.Max(1, area.Height / 30);   // ~3.3% for very small images
+                // Use larger padding for captcha images - at least 8-10 pixels on each side
+                int padX = Math.Max(8, area.Width / 8);   // At least 8px or 12.5% of width
+                int padY = Math.Max(6, area.Height / 6);   // At least 6px or 16.7% of height
                 var padded = new Rectangle(area.X - padX, area.Y - padY, area.Width + padX * 2, area.Height + padY * 2);
 
                 if (_config.UseManualCapture || _config.UseAbsoluteCoordinates)
